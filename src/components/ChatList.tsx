@@ -1,0 +1,114 @@
+import { memo, Fragment } from 'react'
+import { Box, Text } from 'ink'
+import { currentTheme } from '../theme.js'
+import { formatMsgTime, truncate } from '../format.js'
+import type { WaThread } from '../wa/gateway.js'
+
+export type ChatFilter = 'all' | 'groups' | 'direct' | 'channels'
+
+const CHIP_DEFS: Array<[ChatFilter, string]> = [['all', 'All'], ['groups', 'Groups'], ['direct', 'Direct'], ['channels', 'Channels']]
+
+/** 1-based column ranges of the filter chips — must match ChipsRow exactly. */
+export const CHIP_ZONES = (() => {
+  let x = 2 // after the leading space
+  return CHIP_DEFS.map(([id, label]) => {
+    const x0 = x
+    const x1 = x + label.length + 1 // ' label '
+    x = x1 + 3 // two separator spaces
+    return { id, x0, x1 }
+  })
+})()
+
+export function ChipsRow({ filter, hoverChip = -1 }: { filter: ChatFilter; hoverChip?: number }) {
+  const theme = currentTheme()
+  return (
+    <Text>
+      {' '}
+      {CHIP_DEFS.map(([id, label], i) => (
+        <Fragment key={id}>
+          {i > 0 ? <Text>{'  '}</Text> : null}
+          <Text
+            backgroundColor={filter === id ? theme.accent : hoverChip === i ? theme.bubbleInHover : theme.bubbleIn}
+            color={filter === id ? 'black' : hoverChip === i ? theme.text : theme.dim}
+            bold={filter === id || hoverChip === i}
+          >
+            {` ${label} `}
+          </Text>
+        </Fragment>
+      ))}
+    </Text>
+  )
+}
+
+export function threadPreview(t: WaThread): string {
+  if (t.typing) return 'typing…'
+  const last = t.messages[t.messages.length - 1]
+  if (!last) return 'no messages yet'
+  let prefix = ''
+  if (last.fromMe) prefix = 'You: '
+  else if (t.jid.endsWith('@g.us') && last.senderName) prefix = `${last.senderName}: `
+  return prefix + last.text.replace(/\n/g, ' ')
+}
+
+interface ChatListProps {
+  threads: WaThread[]
+  selIdx: number
+  width: number
+  height: number
+  filter: ChatFilter
+  /** First visible index — owned by Main so mouse clicks can map to rows. */
+  start: number
+  /** Phone layout: render filter chips instead of the plain title. */
+  chips?: boolean
+  /** Row index under the cursor — gets a hover highlight. */
+  hoverIdx?: number
+  /** Chip index under the cursor (phone layout). */
+  hoverChip?: number
+}
+
+export const ChatList = memo(function ChatList({ threads, selIdx, width, height, filter, start, chips = false, hoverIdx = -1, hoverChip = -1 }: ChatListProps) {
+  const maxItems = Math.max(1, Math.floor(Math.max(1, height - 1) / 2))
+  const theme = currentTheme()
+  const visible = threads.slice(start, start + maxItems)
+  const innerWidth = width - 2
+
+  return (
+    <Box flexDirection="column" height={height}>
+      {chips ? (
+        <ChipsRow filter={filter} hoverChip={hoverChip} />
+      ) : (
+        <Text color={theme.dim} bold>{` CHATS · ${filter}`}</Text>
+      )}
+      {visible.length === 0 ? (
+        <Box flexDirection="column" paddingX={1} paddingTop={1}>
+          <Text color={theme.dimmer}>no conversations yet.</Text>
+          <Text color={theme.dimmer}>Incoming messages will show up here.</Text>
+        </Box>
+      ) : null}
+      {visible.map((t, i) => {
+        const idx = start + i
+        const selected = idx === selIdx
+        const hovered = idx === hoverIdx && !selected
+        const bg = selected || hovered ? theme.bubbleIn : undefined
+        const timeStr = t.messages.length > 0 ? formatMsgTime(t.messages[t.messages.length - 1]!.ts) : ''
+        const badge = t.unread > 0 ? ` ${Math.min(t.unread, 99)} ` : ''
+        const flags = (t.pinned ? '⚑ ' : '') + (t.muted ? '⊘ ' : '')
+        const nameArea = Math.max(6, innerWidth - timeStr.length - badge.length)
+        const nameStr = ` ${selected || hovered ? '›' : ' '}${flags}${truncate(t.name, Math.max(3, nameArea - flags.length - 2))}`.padEnd(nameArea)
+        const previewStr = `   ${truncate(threadPreview(t), Math.max(4, innerWidth - 3 - badge.length))}`.padEnd(Math.max(4, innerWidth - badge.length))
+        return (
+          <Box key={t.jid} flexDirection="column">
+            <Text>
+              <Text backgroundColor={bg} color={selected ? theme.accent : hovered ? theme.text : theme.text} bold={selected}>{nameStr}</Text>
+              <Text backgroundColor={bg} color={theme.dimmer}>{timeStr}</Text>
+              {badge ? <Text backgroundColor={theme.accent} color="black" bold>{badge}</Text> : null}
+            </Text>
+            <Text>
+              <Text backgroundColor={bg} color={t.typing ? theme.info : theme.dimmer}>{previewStr}</Text>
+            </Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+})

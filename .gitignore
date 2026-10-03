@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.auth/
+.config/
+*.log
+.DS_Store
+opencode.json
+.opencode
+.config
+.auth
+.rawdata
+.testproto
+.example
+dist/
+.devcontainer
+.vscode/
+.metals/
+A test/

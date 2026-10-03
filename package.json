@@ -1,0 +1,48 @@
+{
+  "name": "whatsapptui",
+  "version": "0.1.0-alpha.1",
+  "description": "WhatsAppTUI is an experimental project built on `zapo-js`. It lets you use WhatsApp directly in the terminal.",
+  "type": "module",
+  "author": "HumanAnomaly",
+  "license": "MIT",
+  "homepage": "https://github.com/HumanAnomaly/WhatsAppTUI#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HumanAnomaly/WhatsAppTUI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HumanAnomaly/WhatsAppTUI/issues"
+  },
+  "keywords": [
+    "whatsapp",
+    "tui",
+    "terminal",
+    "cli",
+    "ink",
+    "react",
+    "zapo"
+  ],
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "start": "tsx src/index.tsx",
+    "dev": "tsx src/index.tsx",
+    "demo": "tsx src/index.tsx --demo",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zapo-js/store-sqlite": "^1.0.0",
+    "ink": "^8.0.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.0",
+    "zapo-js": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
