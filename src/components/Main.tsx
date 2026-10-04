@@ -6,8 +6,8 @@ import { useGateway, useIsTTY, useTerminalSize, useThreads, useTicker } from '..
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
 import { Screen } from './Screen.js'
 import { copyToClipboard } from '../clipboard.js'
-import { gateway } from '../wa/gateway.js'
-import { ChatList, ChipsRow, CHIP_ZONES, type ChatFilter } from './ChatList.js'
+import { gateway, type WaThread } from '../wa/gateway.js'
+import { ChatList, CHIP_ZONES, type ChatFilter } from './ChatList.js'
 import { ChatHeader, MessageList } from './ChatView.js'
 import { InputLine } from './InputBox.js'
 
@@ -24,6 +24,14 @@ const MEDIA_COMMANDS: Record<string, MediaKind> = {
   doc: 'document',
   stk: 'sticker',
 }
+
+const noop = (): void => undefined
+
+const matchesFilter = (t: WaThread, f: ChatFilter): boolean =>
+  f === 'all' ||
+  (f === 'groups' && t.jid.endsWith('@g.us')) ||
+  (f === 'direct' && !t.jid.endsWith('@g.us') && !t.jid.endsWith('@newsletter')) ||
+  (f === 'channels' && t.jid.endsWith('@newsletter'))
 
 const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobile: boolean; hoverMenu?: boolean }) {
   const state = useGateway()
@@ -76,40 +84,62 @@ export const Main = memo(function Main() {
   const mobile = cols < MOBILE_BREAKPOINT
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
   const [filter, setFilter] = useState<ChatFilter>('all')
+  const [archivedView, setArchivedView] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [query, setQuery] = useState('')
   // Selection is keyed by JID, not index: when a sent message bumps a thread
   // to the top of the sort order, the selection follows the same conversation.
   const [selJid, setSelJid] = useState<string | null>(() => state.activeJid)
   const [scroll, setScroll] = useState(0)
   const [listStart, setListStart] = useState(0)
 
+  // The archived folder is a separate dimension from the type filter, exactly
+  // like WhatsApp: the same chips apply inside it.
   const filtered = useMemo(
-    () =>
-      threads.filter(
-        (t) =>
-          filter === 'all' ||
-          (filter === 'groups' && t.jid.endsWith('@g.us')) ||
-          (filter === 'direct' && !t.jid.endsWith('@g.us') && !t.jid.endsWith('@newsletter')) ||
-          (filter === 'channels' && t.jid.endsWith('@newsletter')),
-      ),
-    [threads, filter],
+    () => threads.filter((t) => t.archived === archivedView && matchesFilter(t, filter)),
+    [threads, filter, archivedView],
   )
-  const foundIdx = filtered.findIndex((t) => t.jid === selJid)
+  // Search narrows the current view live across chat names, JIDs (phone
+  // numbers) and every message loaded into memory so far.
+  const q = query.trim().toLowerCase()
+  const searched = useMemo(() => {
+    if (!q) return filtered
+    return filtered.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.jid.toLowerCase().includes(q) ||
+        t.messages.some((m) => m.text.toLowerCase().includes(q)),
+    )
+  }, [filtered, q])
+
+  const foundIdx = searched.findIndex((t) => t.jid === selJid)
   const selIdx = foundIdx >= 0 ? foundIdx : 0
-  const active = filtered[selIdx] ?? null
+  const active = searched[selIdx] ?? null
   const activeJid = active?.jid ?? null
   const activeJidRef = useRef(activeJid)
   activeJidRef.current = activeJid
-  const filteredRef = useRef(filtered)
-  filteredRef.current = filtered
+  const searchedRef = useRef(searched)
+  searchedRef.current = searched
   const selIdxRef = useRef(selIdx)
   selIdxRef.current = selIdx
+  const threadsRef = useRef(threads)
+  threadsRef.current = threads
+  const archivedRef = useRef(archivedView)
+  archivedRef.current = archivedView
+  const screenRef = useRef(state.screen)
+  screenRef.current = state.screen
+  // Non-empty chat draft — InputLine reports flips; gates arrow navigation.
+  const hasDraftRef = useRef(false)
+
+  const archivedCount = useMemo(() => threads.reduce((n, t) => n + (t.archived ? 1 : 0), 0), [threads])
+  const archivedRowShown = archivedCount > 0 || archivedView
 
   const bodyHeight = Math.max(6, rows - 1)
   const msgRows = Math.max(2, mobile ? bodyHeight - 6 : bodyHeight - 8)
   const listRows = Math.max(4, bodyHeight - 2)
   const listWidth = mobile ? cols : Math.min(38, Math.max(24, Math.floor(cols * 0.34)))
   const msgAreaWidth = mobile ? cols : Math.max(30, cols - listWidth)
-  const listMaxItems = Math.max(1, Math.floor((listRows - 1) / 2))
+  const listMaxItems = Math.max(1, Math.floor((listRows - 1 - (archivedRowShown ? 1 : 0)) / 2))
 
   // ---- cursor hover state ----
   const hover = useHover()
@@ -119,15 +149,20 @@ export const Main = memo(function Main() {
   const hoverBack = mobile && mobileView === 'chat' && hoverRow === 1 && hoverX <= 4
   const hoverKebab = (mobile ? mobileView === 'chat' && hoverRow === 1 : hoverRow === 2) && hoverX >= cols - 3
   const hoverChip =
-    mobile && mobileView === 'list' && hoverRow === 1
+    mobile && mobileView === 'list' && !searchOpen && hoverRow === 1
       ? CHIP_ZONES.findIndex((c) => hoverX >= c.x0 && hoverX <= c.x1)
       : -1
   const hoverHint = hoverRow === rows - 1
+  // First list row (after title/chips and the optional Archived toggle row).
+  const listTop = (mobile ? 2 : 3) + (archivedRowShown ? 1 : 0)
+  const inList = !mobile || mobileView === 'list'
   let hoverIdx = -1
-  if (hoverRow >= (mobile && mobileView === 'list' ? 2 : 3) && (mobile || hoverX - 1 < listWidth)) {
-    const idx = listStart + Math.floor((hoverRow - (mobile && mobileView === 'list' ? 2 : 3)) / 2)
-    if (idx >= 0 && idx < filtered.length) hoverIdx = idx
+  if (inList && hoverRow >= listTop && (mobile || hoverX - 1 < listWidth)) {
+    const idx = listStart + Math.floor((hoverRow - listTop) / 2)
+    if (idx >= 0 && idx < searched.length) hoverIdx = idx
   }
+  const hoverArchived =
+    inList && archivedRowShown && hoverRow === listTop - 1 && (mobile || hoverX - 1 < listWidth)
 
   // ---- toast (shown in the hint row, no layout shift) ----
   const [toast, setToast] = useState<string | null>(null)
@@ -139,6 +174,7 @@ export const Main = memo(function Main() {
   }, [])
   const onCopy = useCallback(
     (text: string) => {
+      if (screenRef.current !== 'main') return // a popup owns the pointer
       showToast(copyToClipboard(text) ? '✓ copied to clipboard' : 'copy not supported in this terminal')
     },
     [showToast],
@@ -155,6 +191,7 @@ export const Main = memo(function Main() {
   }, [selIdx, listMaxItems])
 
   useEffect(() => {
+    hasDraftRef.current = false // fresh chat, fresh (empty) input
     if (activeJid) void gateway.activateChat(activeJid)
   }, [activeJid])
 
@@ -181,6 +218,31 @@ export const Main = memo(function Main() {
 
   const goBack = useCallback(() => setMobileView('list'), [])
 
+  // ---- search & folder actions (stable: setters + refs only) ----
+  const applyFilter = useCallback((f: ChatFilter) => {
+    setFilter(f)
+    setSelJid(threadsRef.current.find((t) => t.archived === archivedRef.current && matchesFilter(t, f))?.jid ?? null)
+    setScroll(0)
+    setListStart(0)
+  }, [])
+  const openFolder = useCallback((archived: boolean) => {
+    setArchivedView(archived)
+    setSelJid(threadsRef.current.find((t) => t.archived === archived)?.jid ?? null)
+    setScroll(0)
+    setListStart(0)
+  }, [])
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false)
+    setQuery('')
+  }, [])
+  const onSearchChange = useCallback((text: string) => {
+    setQuery(text)
+    setListStart(0)
+  }, [])
+  const onDraftChange = useCallback((hasText: boolean) => {
+    hasDraftRef.current = hasText
+  }, [])
+
   // Latest geometry for the mouse handler (stable callback, live values).
   const geo = useRef({
     mobile,
@@ -189,14 +251,36 @@ export const Main = memo(function Main() {
     cols,
     listWidth,
     listMaxItems,
-    len: filtered.length,
+    len: searched.length,
     start: listStart,
+    screen: state.screen,
+    searchOpen,
+    archivedView,
+    archivedRowShown,
+    listTop,
   })
-  geo.current = { mobile, mobileView, rows, cols, listWidth, listMaxItems, len: filtered.length, start: listStart }
+  geo.current = {
+    mobile,
+    mobileView,
+    rows,
+    cols,
+    listWidth,
+    listMaxItems,
+    len: searched.length,
+    start: listStart,
+    screen: state.screen,
+    searchOpen,
+    archivedView,
+    archivedRowShown,
+    listTop,
+  }
 
   const onMouse = useCallback((e: MouseEvt) => {
     const row = e.y - 1
     const g = geo.current
+
+    // The help popup owns the pointer while it is open.
+    if (g.screen !== 'main') return
 
     // Touch-drag (Termux) / mouse drag scrolls whichever panel is under the finger.
     if (e.kind === 'drag') {
@@ -235,20 +319,23 @@ export const Main = memo(function Main() {
       }
       if (g.mobileView === 'list') {
         if (row === 1) {
-          const chip = CHIP_ZONES.find((c) => e.x >= c.x0 && e.x <= c.x1)
-          if (chip) {
-            setFilter(chip.id)
-            setSelJid(filteredRef.current[0]?.jid ?? null)
-            setScroll(0)
+          if (!g.searchOpen) {
+            const chip = CHIP_ZONES.find((c) => e.x >= c.x0 && e.x <= c.x1)
+            if (chip) applyFilter(chip.id)
           }
           return
         }
-        if (row >= 2) {
-          const idx = g.start + Math.floor((row - 2) / 2)
-          const jid = filteredRef.current[idx]?.jid
+        if (g.archivedRowShown && row === g.listTop - 1) {
+          openFolder(!g.archivedView) // Archived ⇄ All chats toggle row
+          return
+        }
+        if (row >= g.listTop) {
+          const idx = g.start + Math.floor((row - g.listTop) / 2)
+          const jid = searchedRef.current[idx]?.jid
           if (jid) {
             setSelJid(jid) // tap a chat = open it, like the phone app
             setMobileView('chat')
+            closeSearch()
           }
         }
         return
@@ -271,39 +358,54 @@ export const Main = memo(function Main() {
       gateway.setScreen('chatMenu') // ⋮ kebab in the chat header
       return
     }
-    if (e.x - 1 < g.listWidth && row >= 3) {
-      const idx = g.start + Math.floor((row - 3) / 2)
-      const jid = filteredRef.current[idx]?.jid
-      if (jid) {
-        setSelJid(jid)
-        setScroll(0)
+    if (e.x - 1 < g.listWidth) {
+      if (g.archivedRowShown && row === g.listTop - 1) {
+        openFolder(!g.archivedView)
+        return
+      }
+      if (row >= g.listTop) {
+        const idx = g.start + Math.floor((row - g.listTop) / 2)
+        const jid = searchedRef.current[idx]?.jid
+        if (jid) {
+          setSelJid(jid)
+          setScroll(0)
+        }
       }
     }
-  }, [])
+  }, [applyFilter, openFolder, closeSearch])
   useMouse(onMouse)
 
   useInput(
     (input, key) => {
-      if (key.tab) {
-        setFilter((f) => FILTER_ORDER[(FILTER_ORDER.indexOf(f) + 1) % FILTER_ORDER.length]!)
-        setSelJid(filteredRef.current[0]?.jid ?? null)
-        setScroll(0)
+      if (key.tab && key.shift) {
+        openFolder(!archivedView) // toggle the archived folder
         return
       }
+      if (key.tab) {
+        applyFilter(FILTER_ORDER[(FILTER_ORDER.indexOf(filter) + 1) % FILTER_ORDER.length]!)
+        return
+      }
+      // While a draft is being typed, ↑/↓ must not switch chats — the input
+      // is remounted per chat, so that would silently drop the draft.
+      if ((key.upArrow || key.downArrow) && hasDraftRef.current && !searchOpen) return
       if (key.upArrow) {
-        setSelJid(filteredRef.current[selIdxRef.current - 1]?.jid ?? filteredRef.current[0]?.jid ?? null)
+        setSelJid(searchedRef.current[selIdxRef.current - 1]?.jid ?? searchedRef.current[0]?.jid ?? null)
         setScroll(0)
         return
       }
       if (key.downArrow) {
-        setSelJid(filteredRef.current[selIdxRef.current + 1]?.jid ?? filteredRef.current[filteredRef.current.length - 1]?.jid ?? null)
+        setSelJid(
+          searchedRef.current[selIdxRef.current + 1]?.jid ??
+            searchedRef.current[searchedRef.current.length - 1]?.jid ??
+            null,
+        )
         setScroll(0)
         return
       }
       if (key.pageUp || key.pageDown) {
         if (mobile && mobileView === 'list') {
           const dir = key.pageUp ? -listMaxItems : listMaxItems
-          const maxStart = Math.max(0, filtered.length - listMaxItems)
+          const maxStart = Math.max(0, searched.length - listMaxItems)
           setListStart((s) => Math.max(0, Math.min(maxStart, s + dir)))
           return
         }
@@ -323,7 +425,20 @@ export const Main = memo(function Main() {
         return
       }
       if (key.return && mobile && mobileView === 'list') {
-        if (active) setMobileView('chat')
+        if (active) {
+          setMobileView('chat')
+          closeSearch()
+        }
+        return
+      }
+      if (key.ctrl && input === 'f') {
+        if (searchOpen) closeSearch()
+        else {
+          if (mobile && mobileView === 'chat') setMobileView('list')
+          setSearchOpen(true)
+          setQuery('')
+          setListStart(0)
+        }
         return
       }
       if (key.ctrl && input === 's') {
@@ -342,21 +457,56 @@ export const Main = memo(function Main() {
         gateway.setScreen('chatMenu')
       }
     },
-    { isActive: isTTY },
+    { isActive: isTTY && state.screen === 'main' },
   )
+
+  const searchInput = searchOpen ? (
+    <InputLine
+      width={mobile ? cols : listWidth}
+      enabled={state.screen === 'main'}
+      placeholder="search chats or messages"
+      onSubmit={closeSearch}
+      onEscape={closeSearch}
+      onChange={onSearchChange}
+      onTypingChange={noop}
+    />
+  ) : null
 
   return (
     <Screen>
       <StatusBar mobile={mobile} hoverMenu={hoverMenu} />
       {mobile && mobileView === 'list' ? (
-        <ChatList threads={filtered} selIdx={selIdx} width={cols} height={bodyHeight} filter={filter} start={listStart} chips hoverIdx={hoverIdx} hoverChip={hoverChip} />
+        <ChatList
+          threads={searched}
+          selIdx={selIdx}
+          width={cols}
+          height={bodyHeight}
+          filter={filter}
+          start={listStart}
+          chips
+          hoverIdx={hoverIdx}
+          hoverChip={hoverChip}
+          archivedCount={archivedCount}
+          archivedView={archivedView}
+          hoverArchived={hoverArchived}
+          header={searchInput}
+        />
       ) : mobile ? (
         <Box flexDirection="column" height={bodyHeight}>
           <ChatHeader thread={active} rev={active?.rev ?? 0} width={cols} mobile hoverBack={hoverBack} hoverKebab={hoverKebab} />
           <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, cols))}</Text>
           <MessageList thread={active} rev={active?.rev ?? 0} width={cols} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} />
           <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, cols))}</Text>
-          <InputLine key={activeJid ?? 'no-chat'} width={cols} enabled onSubmit={onSubmit} onTypingChange={onTypingChange} onEmptyBackspace={goBack} />
+          <InputLine
+            key={activeJid ?? 'no-chat'}
+            width={cols}
+            enabled={state.screen === 'main' && !searchOpen}
+            onSubmit={onSubmit}
+            onTypingChange={onTypingChange}
+            onEmptyBackspace={goBack}
+            onEscape={goBack}
+            onDraftChange={onDraftChange}
+          />
           <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
             {toast ? ` ${toast}` : ' Ctrl+K help · click a message to copy'}
           </Text>
@@ -364,7 +514,19 @@ export const Main = memo(function Main() {
       ) : (
         <Box flexDirection="row" height={bodyHeight}>
           <Box flexDirection="column" width={listWidth} borderStyle="round" borderColor={theme.border}>
-            <ChatList threads={filtered} selIdx={selIdx} width={listWidth} height={listRows} filter={filter} start={listStart} hoverIdx={hoverIdx} />
+            <ChatList
+              threads={searched}
+              selIdx={selIdx}
+              width={listWidth}
+              height={listRows}
+              filter={filter}
+              start={listStart}
+              hoverIdx={hoverIdx}
+              archivedCount={archivedCount}
+              archivedView={archivedView}
+              hoverArchived={hoverArchived}
+              header={searchInput}
+            />
           </Box>
           <Box flexDirection="column" width={msgAreaWidth} borderStyle="round" borderColor={theme.border}>
             <ChatHeader thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} hoverKebab={hoverKebab} />
@@ -372,9 +534,16 @@ export const Main = memo(function Main() {
             <MessageList thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} />
             <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, msgAreaWidth - 2))}</Text>
             {/* key: remount per chat so drafts never leak across conversations */}
-            <InputLine key={activeJid ?? 'no-chat'} width={msgAreaWidth} enabled onSubmit={onSubmit} onTypingChange={onTypingChange} />
+            <InputLine
+              key={activeJid ?? 'no-chat'}
+              width={msgAreaWidth}
+              enabled={state.screen === 'main' && !searchOpen}
+              onSubmit={onSubmit}
+              onTypingChange={onTypingChange}
+              onDraftChange={onDraftChange}
+            />
             <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
-              {toast ? ` ${toast}` : ' Ctrl+K help · click a message to copy it'}
+              {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · click a message to copy it'}
             </Text>
           </Box>
         </Box>

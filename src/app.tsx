@@ -9,7 +9,7 @@ import { Pairing } from './components/Pairing.js'
 import { Main } from './components/Main.js'
 import { SettingsScreen } from './components/Settings.js'
 import { ChatMenu } from './components/ChatMenu.js'
-import { HelpScreen } from './components/Help.js'
+import { HelpPopup } from './components/Help.js'
 import { ProfileScreen } from './components/Profile.js'
 import { gateway } from './wa/gateway.js'
 
@@ -53,12 +53,15 @@ export function App() {
         <SettingsScreen />
       ) : state.screen === 'chatMenu' ? (
         <ChatMenu />
-      ) : state.screen === 'help' ? (
-        <HelpScreen />
       ) : state.screen === 'profile' ? (
         <ProfileScreen />
       ) : (
-        <Main />
+        // Help is a popup over Main, not a screen swap — Main stays mounted so
+        // selection, drafts and scroll state survive opening/closing it.
+        <>
+          <Main />
+          {state.screen === 'help' ? <HelpPopup /> : null}
+        </>
       )}
     </>
   )

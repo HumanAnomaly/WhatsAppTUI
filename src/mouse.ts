@@ -75,6 +75,8 @@ export function MouseRouter(): null {
     if (!isTTY) return
     const stdin = process.stdin
     let lastDragY = 0
+    let pressPos: { x: number; y: number } | null = null
+    let dragging = false
 
     const onData = (chunk: Buffer | string): void => {
       const data = String(chunk)
@@ -96,6 +98,7 @@ export function MouseRouter(): null {
           // Left button held and moving — touch swipe / mouse drag.
           const dy = y - lastDragY
           lastDragY = y
+          if (pressPos) dragging = true
           if (dy !== 0) for (const h of handlers) h({ kind: 'drag', x, y, dy })
           continue
         }
@@ -105,9 +108,18 @@ export function MouseRouter(): null {
           continue
         }
         if (!release && b === 0) {
+          // Press: remember it and fire the click on release, so a touch swipe
+          // (press + drag + release) never registers as an accidental tap.
+          pressPos = { x, y }
+          dragging = false
           lastDragY = y
           setHover(x, y)
-          for (const h of handlers) h({ kind: 'click', x, y })
+          continue
+        }
+        if (release && b === 0 && pressPos) {
+          pressPos = null
+          if (!dragging) for (const h of handlers) h({ kind: 'click', x, y })
+          continue
         }
       }
     }

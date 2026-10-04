@@ -10,6 +10,14 @@ interface InputLineProps {
   onTypingChange: (typing: boolean) => void
   /** Phone layout: Backspace on an empty draft goes back to the chat list. */
   onEmptyBackspace?: () => void
+  /** Esc on an empty draft (chat: back on mobile — search: close). */
+  onEscape?: () => void
+  /** Live text updates — used by the search bar to filter as you type. */
+  onChange?: (text: string) => void
+  /** Draft empty/non-empty flips — lets Main gate arrow-key navigation. */
+  onDraftChange?: (hasText: boolean) => void
+  /** Shown when the draft is empty (default: the chat message hint). */
+  placeholder?: string
 }
 
 /**
@@ -20,7 +28,7 @@ interface InputLineProps {
  * - fixed width: long drafts scroll instead of wrapping (stable frame height)
  * - typing state is owned here so Main never re-renders on keystrokes
  */
-export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onTypingChange, onEmptyBackspace }: InputLineProps) {
+export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onTypingChange, onEmptyBackspace, onEscape, onChange, onDraftChange, placeholder }: InputLineProps) {
   const theme = currentTheme()
   const isTTY = useIsTTY()
   const [chars, setChars] = useState<string[]>([])
@@ -53,7 +61,14 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
     setStart(0)
     if (idleTimer.current) clearTimeout(idleTimer.current)
     onTypingChange(false)
+    onChange?.('')
   }
+
+  // Report draft emptiness after every render — Main reads it at key-event
+  // time to decide whether ↑/↓ may still switch chats.
+  useEffect(() => {
+    onDraftChange?.(chars.length > 0)
+  })
 
   useInput(
     (input, key) => {
@@ -64,7 +79,8 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
         return
       }
       if (key.escape) {
-        reset()
+        if (chars.length > 0) reset()
+        else onEscape?.()
         return
       }
       if (key.leftArrow) {
@@ -95,19 +111,22 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
         while (i > 0 && chars[i - 1] !== ' ') i -= 1
         setChars((prev) => [...prev.slice(0, i), ...prev.slice(cursor)])
         setCursor(i)
+        onChange?.(chars.slice(0, i).join('') + chars.slice(cursor).join(''))
         return
       }
       if (key.backspace) {
         if (cursor > 0) {
           setChars((prev) => [...prev.slice(0, cursor - 1), ...prev.slice(cursor)])
           setCursor(cursor - 1)
-        } else {
+          onChange?.(chars.slice(0, cursor - 1).join('') + chars.slice(cursor).join(''))
+        } else if (chars.length === 0) {
           onEmptyBackspace?.()
         }
         return
       }
       if (key.delete) {
         setChars((prev) => [...prev.slice(0, cursor), ...prev.slice(cursor + 1)])
+        onChange?.(chars.slice(0, cursor).join('') + chars.slice(cursor + 1).join(''))
         return
       }
       if (input && !key.ctrl && !key.meta && !input.includes('\x1b')) {
@@ -117,6 +136,7 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
         setChars((prev) => [...prev.slice(0, cursor), ...graphemes, ...prev.slice(cursor)])
         setCursor(cursor + graphemes.length)
         onTypingChange(true)
+        onChange?.(chars.slice(0, cursor).join('') + graphemes.join('') + chars.slice(cursor).join(''))
         if (idleTimer.current) clearTimeout(idleTimer.current)
         idleTimer.current = setTimeout(() => onTypingChange(false), 3_000)
       }
@@ -137,7 +157,7 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
       {chars.length === 0 ? (
         <>
           <Text backgroundColor={theme.accent} color="black">{' '}</Text>
-          <Text color={theme.dimmer}> type a message · Enter send · Esc clear</Text>
+          <Text color={theme.dimmer}>{` ${placeholder ?? 'type a message · Enter send · Esc clear'}`}</Text>
         </>
       ) : (
         <>

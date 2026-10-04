@@ -203,7 +203,10 @@ export class WaGateway {
   getThreadsSnapshot = (): WaThread[] => {
     if (this.viewDirty) {
       const sort = getSettings().chatSort
-      const all = [...this.threads.values()].filter((t) => !t.archived)
+      // Archived threads stay in the snapshot on purpose: the main list filters
+      // them out per view, and ChatMenu must still find an archived chat to
+      // offer "Unarchive".
+      const all = [...this.threads.values()]
       all.sort((a, b) => {
         if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
         if (sort === 'name') return a.name.localeCompare(b.name)
@@ -566,6 +569,36 @@ export class WaGateway {
     }
   }
 
+  /** Read receipts for messages that arrived while another chat was open. */
+  private async markThreadRead(jid: string): Promise<void> {
+    const client = this.client
+    if (!client || !getSettings().readReceipts) return
+    const t = this.threads.get(jid)
+    if (!t) return
+    const pending = t.messages
+      .filter((m) => !m.fromMe && !m.system && !this.receiptSent.has(m.id))
+      .slice(-50)
+    // Group receipts are addressed per participant; direct chats need none.
+    const byParticipant = new Map<string | undefined, string[]>()
+    for (const m of pending) {
+      this.receiptSent.add(m.id)
+      const participant = jid.endsWith('@g.us') ? m.senderJid : undefined
+      const ids = byParticipant.get(participant) ?? []
+      ids.push(m.id)
+      byParticipant.set(participant, ids)
+    }
+    for (const [participant, ids] of byParticipant) {
+      try {
+        await client.message.sendReceipt(jid, ids, {
+          type: 'read',
+          ...(participant ? { participant } : {}),
+        })
+      } catch {
+        // read receipt is best-effort
+      }
+    }
+  }
+
   // -------------------------------------------------------- store hydration
 
   /** Show the saved contact name, else the phone number — never a raw JID/LID. */
@@ -628,66 +661,81 @@ export class WaGateway {
     try {
       const sess = store.session('default')
       const threadRecords = await sess.threads.list(300)
-      for (const rec of threadRecords) {
-        if (isStatusBroadcastJid(rec.jid) || isNewsletterJid(rec.jid)) continue
-        const t = this.thread(rec.jid)
-        let changed = false
-        if (rec.name && !t.nameSet) {
-          t.name = rec.name
-          t.nameSet = true
-          changed = true
-        }
-        if (!rec.jid.endsWith('@g.us')) void this.resolveNameFromContacts(rec.jid)
-        const unread = rec.unreadCount ?? 0
-        if (unread > t.unread) {
-          t.unread = unread
-          changed = true
-        }
-        const pinned = (rec.pinned ?? 0) > 0
-        if (pinned !== t.pinned) {
-          t.pinned = pinned
-          changed = true
-        }
-        const muted = (rec.muteEndMs ?? 0) > Date.now()
-        if (muted !== t.muted) {
-          t.muted = muted
-          changed = true
-        }
-        const stored = await sess.messages.listByThread(rec.jid, 120)
-        const unnamedSenders = new Set<string>()
-        for (const m of stored) {
-          if (t.messages.some((x) => x.id === m.id && x.fromMe === m.fromMe)) continue
-          const participant = m.participantJid ?? m.senderJid
-          if (participant && !t.senderNames[participant]) unnamedSenders.add(participant)
-          t.messages.push({
-            id: m.id,
-            fromMe: m.fromMe,
-            senderJid: participant,
-            senderName: participant ? t.senderNames[participant] : undefined,
-            text: decodeStoredMessage(m.messageBytes),
-            ts: m.timestampMs ?? Date.now(),
-            status: 'read',
-          })
-          changed = true
-        }
-        for (const senderJid of unnamedSenders) {
+      // Threads hydrate independently — fan out so one slow SQLite read
+      // doesn't serialize the whole boot.
+      await Promise.all(
+        threadRecords.map(async (rec) => {
           try {
-            const contact = await sess.contacts.getByJid(senderJid)
-            const name = contact?.displayName ?? contact?.pushName
-            if (name) t.senderNames[senderJid] = name
+            if (isStatusBroadcastJid(rec.jid) || isNewsletterJid(rec.jid)) return
+            const t = this.thread(rec.jid)
+            let changed = false
+            if (rec.name && !t.nameSet) {
+              t.name = rec.name
+              t.nameSet = true
+              changed = true
+            }
+            if (!rec.jid.endsWith('@g.us')) void this.resolveNameFromContacts(rec.jid)
+            const unread = rec.unreadCount ?? 0
+            if (unread > t.unread) {
+              t.unread = unread
+              changed = true
+            }
+            const pinned = (rec.pinned ?? 0) > 0
+            if (pinned !== t.pinned) {
+              t.pinned = pinned
+              changed = true
+            }
+            const muted = (rec.muteEndMs ?? 0) > Date.now()
+            if (muted !== t.muted) {
+              t.muted = muted
+              changed = true
+            }
+            const archived = rec.archived === true
+            if (archived !== t.archived) {
+              t.archived = archived
+              changed = true
+            }
+            const stored = await sess.messages.listByThread(rec.jid, 120)
+            const unnamedSenders = new Set<string>()
+            for (const m of stored) {
+              if (t.messages.some((x) => x.id === m.id && x.fromMe === m.fromMe)) continue
+              const participant = m.participantJid ?? m.senderJid
+              if (participant && !t.senderNames[participant]) unnamedSenders.add(participant)
+              t.messages.push({
+                id: m.id,
+                fromMe: m.fromMe,
+                senderJid: participant,
+                senderName: participant ? t.senderNames[participant] : undefined,
+                text: decodeStoredMessage(m.messageBytes),
+                ts: m.timestampMs ?? Date.now(),
+                status: 'read',
+              })
+              changed = true
+            }
+            await Promise.all(
+              [...unnamedSenders].map(async (senderJid) => {
+                try {
+                  const contact = await sess.contacts.getByJid(senderJid)
+                  const name = contact?.displayName ?? contact?.pushName
+                  if (name) t.senderNames[senderJid] = name
+                } catch {
+                  // cosmetic
+                }
+              }),
+            )
+            if (changed) {
+              t.messages.sort((a, b) => a.ts - b.ts)
+              for (const m of t.messages) {
+                if (!m.fromMe && m.senderJid) m.senderName = t.senderNames[m.senderJid] ?? m.senderName
+              }
+              t.lastTs = Math.max(t.lastTs, t.messages[t.messages.length - 1]?.ts ?? 0)
+              this.bump(t)
+            }
           } catch {
-            // cosmetic
+            // per-thread best effort — one bad record must not stall the rest
           }
-        }
-        if (changed) {
-          t.messages.sort((a, b) => a.ts - b.ts)
-          for (const m of t.messages) {
-            if (!m.fromMe && m.senderJid) m.senderName = t.senderNames[m.senderJid] ?? m.senderName
-          }
-          t.lastTs = Math.max(t.lastTs, t.messages[t.messages.length - 1]?.ts ?? 0)
-          this.bump(t)
-        }
-      }
+        }),
+      )
     } catch {
       // hydration is best-effort — live events still populate the UI
     }
@@ -885,6 +933,7 @@ export class WaGateway {
     if (t.unread > 0) {
       t.unread = 0
       changed = true
+      void this.markThreadRead(jid)
     }
     if (resubscribe && !jid.endsWith('@newsletter') && this.client) {
       try {
@@ -948,8 +997,15 @@ export class WaGateway {
     const trimmed = text.trim()
     if (!trimmed) return
     const t = this.thread(jid)
-    if (this.state.demo || !client) {
+    if (this.state.demo) {
       this.demoSend(t, trimmed)
+      return
+    }
+    if (!client) {
+      // Offline but not a demo: keep the draft visible, marked as failed.
+      t.messages.push({ id: `local-${Date.now()}`, fromMe: true, text: trimmed, ts: Date.now(), status: 'failed' })
+      t.lastTs = Date.now()
+      this.bump(t)
       return
     }
     const pendingId = `local-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
@@ -1004,8 +1060,15 @@ export class WaGateway {
     }
     const placeholder = caption ? `${icons[kind]} ${caption}` : icons[kind]!
 
-    if (this.state.demo || !client) {
+    if (this.state.demo) {
       t.messages.push({ id: `demo-media-${Date.now()}`, fromMe: true, text: placeholder, ts: Date.now(), status: 'read' })
+      t.lastTs = Date.now()
+      this.bump(t)
+      return
+    }
+
+    if (!client) {
+      t.messages.push({ id: `media-${Date.now()}`, fromMe: true, text: `${placeholder} · send failed: not connected`, ts: Date.now(), status: 'failed' })
       t.lastTs = Date.now()
       this.bump(t)
       return
@@ -1205,6 +1268,7 @@ export class WaGateway {
       unread: number
       pinned?: boolean
       muted?: boolean
+      archived?: boolean
       msgs: Array<[fromMe: boolean, sender: string, text: string, ts: number]>
     }> = [
       {
@@ -1257,6 +1321,7 @@ export class WaGateway {
         name: '+6281234500003',
         jid: '6281234500003@s.whatsapp.net',
         unread: 0,
+        archived: true,
         msgs: [[false, '', 'Your package has been shipped. Track: wa.me/track/123', now - 27 * H]],
       },
       {
@@ -1276,6 +1341,7 @@ export class WaGateway {
       t.nameSet = true
       t.pinned = s.pinned ?? false
       t.muted = s.muted ?? false
+      t.archived = s.archived ?? false
       for (const [fromMe, sender, text, ts] of s.msgs) {
         t.messages.push({
           id: `demo-${s.jid}-${t.messages.length}`,

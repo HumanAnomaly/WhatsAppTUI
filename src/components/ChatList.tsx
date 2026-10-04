@@ -1,7 +1,7 @@
-import { memo, Fragment } from 'react'
+import { memo, Fragment, type ReactNode } from 'react'
 import { Box, Text } from 'ink'
 import { currentTheme } from '../theme.js'
-import { formatMsgTime, truncate } from '../format.js'
+import { formatMsgTime, padVisual, truncateVisual } from '../format.js'
 import type { WaThread } from '../wa/gateway.js'
 
 export type ChatFilter = 'all' | 'groups' | 'direct' | 'channels'
@@ -64,25 +64,44 @@ interface ChatListProps {
   hoverIdx?: number
   /** Chip index under the cursor (phone layout). */
   hoverChip?: number
+  /** Cursor is on the Archived toggle row. */
+  hoverArchived?: boolean
+  /** Number of archived chats — shows the toggle row when > 0. */
+  archivedCount: number
+  /** Currently browsing the archived folder. */
+  archivedView: boolean
+  /** Replaces the title/chips row — the search input. */
+  header?: ReactNode
 }
 
-export const ChatList = memo(function ChatList({ threads, selIdx, width, height, filter, start, chips = false, hoverIdx = -1, hoverChip = -1 }: ChatListProps) {
-  const maxItems = Math.max(1, Math.floor(Math.max(1, height - 1) / 2))
+export const ChatList = memo(function ChatList({ threads, selIdx, width, height, filter, start, chips = false, hoverIdx = -1, hoverChip = -1, hoverArchived = false, archivedCount, archivedView, header }: ChatListProps) {
+  const archivedRowShown = archivedCount > 0 || archivedView
+  const maxItems = Math.max(1, Math.floor(Math.max(1, height - 1 - (archivedRowShown ? 1 : 0)) / 2))
   const theme = currentTheme()
   const visible = threads.slice(start, start + maxItems)
   const innerWidth = width - 2
 
   return (
     <Box flexDirection="column" height={height}>
-      {chips ? (
+      {header ?? (chips ? (
         <ChipsRow filter={filter} hoverChip={hoverChip} />
       ) : (
-        <Text color={theme.dim} bold>{` CHATS · ${filter}`}</Text>
-      )}
+        <Text color={theme.dim} bold>{` CHATS · ${filter}${archivedView ? ' · archived' : ''}`}</Text>
+      ))}
+      {archivedRowShown ? (
+        <Text
+          backgroundColor={hoverArchived ? theme.bubbleIn : undefined}
+          color={theme.accent}
+          bold={hoverArchived}
+          wrap="truncate-end"
+        >
+          {` ${archivedView ? '‹' : '⌄'} ${archivedView ? 'All chats' : `Archived · ${archivedCount}`}`}
+        </Text>
+      ) : null}
       {visible.length === 0 ? (
         <Box flexDirection="column" paddingX={1} paddingTop={1}>
-          <Text color={theme.dimmer}>no conversations yet.</Text>
-          <Text color={theme.dimmer}>Incoming messages will show up here.</Text>
+          <Text color={theme.dimmer}>{archivedView ? 'no archived chats.' : 'no conversations yet.'}</Text>
+          {archivedView ? null : <Text color={theme.dimmer}>Incoming messages will show up here.</Text>}
         </Box>
       ) : null}
       {visible.map((t, i) => {
@@ -94,8 +113,8 @@ export const ChatList = memo(function ChatList({ threads, selIdx, width, height,
         const badge = t.unread > 0 ? ` ${Math.min(t.unread, 99)} ` : ''
         const flags = (t.pinned ? '⚑ ' : '') + (t.muted ? '⊘ ' : '')
         const nameArea = Math.max(6, innerWidth - timeStr.length - badge.length)
-        const nameStr = ` ${selected || hovered ? '›' : ' '}${flags}${truncate(t.name, Math.max(3, nameArea - flags.length - 2))}`.padEnd(nameArea)
-        const previewStr = `   ${truncate(threadPreview(t), Math.max(4, innerWidth - 3 - badge.length))}`.padEnd(Math.max(4, innerWidth - badge.length))
+        const nameStr = padVisual(` ${selected || hovered ? '›' : ' '}${flags}${truncateVisual(t.name, Math.max(3, nameArea - flags.length - 2))}`, nameArea)
+        const previewStr = padVisual(`   ${truncateVisual(threadPreview(t), Math.max(4, innerWidth - 3 - badge.length))}`, Math.max(4, innerWidth - badge.length))
         return (
           <Box key={t.jid} flexDirection="column">
             <Text>

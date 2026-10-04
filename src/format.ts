@@ -34,6 +34,27 @@ export function truncate(text: string, max: number): string {
   return text.slice(0, Math.max(0, max - 1)) + '…'
 }
 
+/** Truncate to a maximum terminal-cell width, appending an ellipsis. */
+export function truncateVisual(text: string, max: number): string {
+  if (max <= 0) return ''
+  if (visualWidth(text) <= max) return text
+  let out = ''
+  let width = 0
+  for (const ch of text) {
+    const cw = visualWidth(ch)
+    if (width + cw > max - 1) break
+    out += ch
+    width += cw
+  }
+  return out + '…'
+}
+
+/** Right-pad with spaces until the terminal-cell width reaches `width`. */
+export function padVisual(text: string, width: number): string {
+  const pad = width - visualWidth(text)
+  return pad > 0 ? text + ' '.repeat(pad) : text
+}
+
 export function displayJid(jid: string): string {
   const user = jid.split('@')[0] ?? jid
   if (jid.endsWith('@g.us')) return 'group chat'
