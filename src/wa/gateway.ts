@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { basename, dirname, extname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -10,22 +11,57 @@ import {
   isNewsletterJid,
   isStatusBroadcastJid,
   proto,
+  resolveMediaPayload,
+  unwrapMessage,
 } from 'zapo-js'
 import { createSqliteStore } from '@zapo-js/store-sqlite'
-import type { WaIncomingMessageEvent, WaStore } from 'zapo-js'
+import type { WaIncomingMessageEvent, WaIncomingUnavailableMessageEvent, WaStore } from 'zapo-js'
+import { ensureDemoAssets } from './demo-assets.js'
+import { wavDurationSec } from '../media.js'
 import { displayJid } from '../format.js'
 import { getSettings, subscribeSettings } from '../config.js'
 
 const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '../..')
 const DATA_DIR = resolvePath(ROOT, '.auth')
 const DATA_FILE = resolvePath(DATA_DIR, 'state.sqlite')
+const MEDIA_DIR = resolvePath(ROOT, '.media')
+// Bundled real demo media (see assets/demo/CREDITS.md) — preferred over the
+// generated BMP/beep fallback so the demo shows a real photo and voice.
+const BUNDLED_DEMO_PHOTO = resolvePath(ROOT, 'assets', 'demo', 'golden-hour.png')
+const BUNDLED_DEMO_VOICE = resolvePath(ROOT, 'assets', 'demo', 'voice-note.wav')
 
-export type MediaKind = 'image' | 'video' | 'audio' | 'voice' | 'document' | 'sticker'
+export type MediaKind = 'image' | 'video' | 'ptv' | 'gif' | 'audio' | 'voice' | 'document' | 'sticker'
+
+export type WaMediaKind = 'image' | 'video' | 'gif' | 'ptv' | 'audio' | 'voice' | 'document' | 'sticker'
+
+export interface WaMediaInfo {
+  kind: WaMediaKind
+  caption?: string
+  fileName?: string
+  mimetype?: string
+  durationSec?: number
+  isPtt?: boolean
+  viewOnce?: boolean
+  ephemeral?: boolean
+  expiresInSec?: number
+  localPath?: string
+  opened?: boolean
+  unavailableKind?: 'view_once' | 'hosted' | 'bot' | 'other'
+  downloadable?: boolean
+}
 
 export interface ProfileView {
   name: string | null
   about: string | null
   privacy: Record<string, string> | null
+}
+
+/** The currently playing voice note — drives the WhatsApp-style player UI. */
+export interface WaPlaybackState {
+  jid: string
+  id: string
+  durationSec: number
+  startedAtMs: number
 }
 
 /** Allowed values per privacy category (from the zapo privacy guide). */
@@ -44,11 +80,18 @@ const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
   '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
   '.mkv': 'video/x-matroska',
   '.avi': 'video/x-msvideo',
   '.mp3': 'audio/mpeg',
   '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
   '.ogg': 'audio/ogg',
   '.opus': 'audio/ogg; codecs=opus',
   '.oga': 'audio/ogg; codecs=opus',
@@ -61,7 +104,8 @@ function guessMimetype(filePath: string, kind: MediaKind): string {
   const mime = MIME_BY_EXT[extname(filePath).toLowerCase()]
   if (mime) return mime
   if (kind === 'image') return 'image/jpeg'
-  if (kind === 'video') return 'video/mp4'
+  if (kind === 'video' || kind === 'ptv') return 'video/mp4'
+  if (kind === 'gif') return 'image/gif'
   if (kind === 'sticker') return 'image/webp'
   if (kind === 'voice') return 'audio/ogg; codecs=opus'
   if (kind === 'audio') return 'audio/mpeg'
@@ -83,6 +127,7 @@ export interface WaMsg {
   ts: number
   status: 'pending' | 'sent' | 'read' | 'failed'
   system?: boolean
+  media?: WaMediaInfo | null
 }
 
 export interface WaThread {
@@ -135,15 +180,255 @@ export interface GatewayState {
 interface LooseMsg {
   conversation?: string | null
   extendedTextMessage?: { text?: string | null } | null
-  imageMessage?: { caption?: string | null } | null
-  videoMessage?: { caption?: string | null; gifPlayback?: boolean | null } | null
-  audioMessage?: unknown
-  documentMessage?: { caption?: string | null; fileName?: string | null } | null
-  stickerMessage?: unknown
+  imageMessage?: { caption?: string | null; fileName?: string | null; mimetype?: string | null; viewOnce?: boolean | null } | null
+  videoMessage?: { caption?: string | null; gifPlayback?: boolean | null; mimetype?: string | null; seconds?: number | null; viewOnce?: boolean | null } | null
+  ptvMessage?: { caption?: string | null; mimetype?: string | null; seconds?: number | null; viewOnce?: boolean | null } | null
+  audioMessage?: { ptt?: boolean | null; seconds?: number | null; mimetype?: string | null; viewOnce?: boolean | null } | null
+  documentMessage?: { caption?: string | null; fileName?: string | null; mimetype?: string | null } | null
+  stickerMessage?: { fileName?: string | null; mimetype?: string | null } | null
   pollCreationMessage?: { name?: string | null } | null
   locationMessage?: { name?: string | null } | null
   liveLocationMessage?: unknown
   contactMessage?: { displayName?: string | null } | null
+  ephemeralMessage?: { message?: unknown } | null
+  viewOnceMessage?: { message?: unknown } | null
+  viewOnceMessageV2?: { message?: unknown } | null
+  documentWithCaptionMessage?: { message?: unknown } | null
+}
+
+export function formatMediaDuration(sec?: number | null): string {
+  if (!sec || sec <= 0) return ''
+  const s = Math.round(sec)
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${String(r).padStart(2, '0')}`
+}
+
+function sanitizeBase(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'media'
+}
+
+function extForMimetype(mime?: string): string {
+  if (!mime) return ''
+  const m = mime.split(';')[0]?.trim().toLowerCase() ?? ''
+  const map: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'video/quicktime': '.mov',
+    'video/webm': '.webm',
+    'audio/mpeg': '.mp3',
+    'audio/mp4': '.m4a',
+    'audio/aac': '.aac',
+    'audio/wav': '.wav',
+    'audio/ogg': '.ogg',
+    'application/pdf': '.pdf',
+    'text/plain': '.txt',
+  }
+  if (m === 'audio/ogg; codecs=opus' || m === 'audio/ogg') return '.ogg'
+  return map[m] ?? ''
+}
+
+function sanitizeJidForPath(jid: string): string {
+  return jid.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 60)
+}
+
+/** Spawn without ever crashing on ENOENT — spawn errors arrive asynchronously. */
+function spawnIgnorant(cmd: string, args: string[], onFail?: () => void): { kill(): void } | null {
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' })
+    child.on('error', () => onFail?.()) // ENOENT etc. — must not become an unhandled event
+    child.unref()
+    return { kill: () => child.kill() }
+  } catch {
+    onFail?.()
+    return null
+  }
+}
+
+export function openExternalFile(filePath: string): void {
+  const fail = (): void => undefined // nothing else we can do; caller shows a toast
+  if (process.platform === 'win32') spawnIgnorant('cmd', ['/c', 'start', '', filePath], fail)
+  else if (process.platform === 'darwin') spawnIgnorant('open', [filePath], fail)
+  else spawnIgnorant('xdg-open', [filePath], fail)
+}
+
+/**
+ * Start audio playback. Returns a kill handle when an in-process player was
+ * spawned (so pause can stop it); null when the OS handler took over. Player
+ * failures (mpv not installed, …) are async, so the chain advances from the
+ * 'error' handler — a missing binary can never crash the app.
+ */
+export function playAudioFile(filePath: string): { kill(): void } | null {
+  const candidates: Array<{ cmd: string; args: string[] }> = []
+  if (process.platform === 'win32' && /\.wav$/i.test(filePath)) {
+    const ps = filePath.replace(/'/g, "''")
+    candidates.push({ cmd: 'powershell', args: ['-NoProfile', '-Command', `(New-Object Media.SoundPlayer '${ps}').PlaySync()`] })
+  }
+  candidates.push(
+    { cmd: 'mpv', args: ['--no-video', filePath] },
+    { cmd: 'ffplay', args: ['-nodisp', '-autoexit', filePath] },
+  )
+  if (process.platform === 'darwin') candidates.push({ cmd: 'afplay', args: [filePath] })
+  if (process.platform === 'linux') {
+    candidates.push(
+      { cmd: 'paplay', args: [filePath] },
+      { cmd: 'aplay', args: [filePath] },
+    )
+  }
+
+  const tryNext = (index: number): { kill(): void } | null => {
+    if (index >= candidates.length) {
+      // Last resort: open with the OS handler (may still play audio).
+      openExternalFile(filePath)
+      return null
+    }
+    const { cmd, args } = candidates[index]!
+    return spawnIgnorant(cmd, args, () => tryNext(index + 1))
+  }
+  return tryNext(0)
+}
+
+/** Rich decode: placeholder text + structured media info (view-once, ptt, gif, ptv, ephemeral). */
+export function describeMessage(
+  message: unknown,
+  expirationSeconds?: number,
+): { text: string; media?: WaMediaInfo | null } {
+  if (!message || typeof message !== 'object') return { text: '' }
+  const raw = message as Record<string, any>
+  let unwrapped: Record<string, any> = raw
+  try {
+    unwrapped = (unwrapMessage(raw as never) as unknown as Record<string, any>) ?? raw
+  } catch {
+    unwrapped = raw
+  }
+  const hasEphemeral = raw['ephemeralMessage'] != null
+  const hasViewOnceWrapper = raw['viewOnceMessage'] != null || raw['viewOnceMessageV2'] != null
+  const ephemeral = hasEphemeral || (expirationSeconds != null && expirationSeconds > 0)
+
+  // Plain text first (but keep ephemeral badge when present).
+  const conv = (unwrapped as LooseMsg).conversation
+  if (conv) return { text: ephemeral ? `${conv} · ⏳` : conv }
+  const ext = (unwrapped as LooseMsg).extendedTextMessage?.text
+  if (ext) return { text: ephemeral ? `${ext} · ⏳` : ext }
+
+  const inlineOnce =
+    (unwrapped as any)?.imageMessage?.viewOnce === true ||
+    (unwrapped as any)?.videoMessage?.viewOnce === true ||
+    (unwrapped as any)?.ptvMessage?.viewOnce === true ||
+    (unwrapped as any)?.audioMessage?.viewOnce === true
+  const viewOnce = hasViewOnceWrapper || inlineOnce
+  const oncePrefix = viewOnce ? '👁️ Once ' : ''
+  const ephSuffix = ephemeral ? ' · ⏳' : ''
+
+  const img = (unwrapped as LooseMsg).imageMessage as any
+  if (img) {
+    const caption = img.caption ?? undefined
+    const media: WaMediaInfo = {
+      kind: 'image',
+      caption,
+      mimetype: img.mimetype ?? undefined,
+      viewOnce: viewOnce || undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    return { text: withCaption(`${oncePrefix}[📷 photo]`, caption) + ephSuffix, media }
+  }
+  const vid = (unwrapped as LooseMsg).videoMessage as any
+  if (vid) {
+    const isGif = vid.gifPlayback === true
+    const dur = formatMediaDuration(vid.seconds)
+    const caption = vid.caption ?? undefined
+    const media: WaMediaInfo = {
+      kind: isGif ? 'gif' : 'video',
+      caption,
+      mimetype: vid.mimetype ?? undefined,
+      durationSec: typeof vid.seconds === 'number' ? vid.seconds : undefined,
+      viewOnce: viewOnce || undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    const label = isGif ? '[🎞️ gif]' : dur ? `[🎬 video ${dur}]` : '[🎬 video]'
+    return { text: withCaption(`${oncePrefix}${label}`, caption) + ephSuffix, media }
+  }
+  const ptv = (unwrapped as LooseMsg).ptvMessage as any
+  if (ptv) {
+    const dur = formatMediaDuration(ptv.seconds)
+    const media: WaMediaInfo = {
+      kind: 'ptv',
+      mimetype: ptv.mimetype ?? undefined,
+      durationSec: typeof ptv.seconds === 'number' ? ptv.seconds : undefined,
+      viewOnce: viewOnce || undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    return { text: `${oncePrefix}[⭕ video note${dur ? ` ${dur}` : ''}]${ephSuffix}`, media }
+  }
+  const aud = (unwrapped as LooseMsg).audioMessage as any
+  if (aud) {
+    const isPtt = aud.ptt === true
+    const dur = formatMediaDuration(aud.seconds)
+    const media: WaMediaInfo = {
+      kind: isPtt ? 'voice' : 'audio',
+      mimetype: aud.mimetype ?? undefined,
+      durationSec: typeof aud.seconds === 'number' ? aud.seconds : undefined,
+      isPtt: isPtt || undefined,
+      viewOnce: viewOnce || undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    const label = isPtt ? `[🎤 voice${dur ? ` ${dur}` : ''}]` : dur ? `[🎧 audio ${dur}]` : '[🎧 audio]'
+    return { text: `${oncePrefix}${label}${ephSuffix}`, media }
+  }
+  const doc = (unwrapped as LooseMsg).documentMessage as any
+  if (doc) {
+    const caption = doc.caption ?? undefined
+    const media: WaMediaInfo = {
+      kind: 'document',
+      caption,
+      fileName: doc.fileName ?? undefined,
+      mimetype: doc.mimetype ?? undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    return { text: withCaption(`[📄 ${doc.fileName ?? 'document'}]`, caption) + ephSuffix, media }
+  }
+  if ((unwrapped as LooseMsg).stickerMessage) {
+    const st = (unwrapped as any).stickerMessage as any
+    const media: WaMediaInfo = {
+      kind: 'sticker',
+      mimetype: st?.mimetype ?? undefined,
+      ephemeral: ephemeral || undefined,
+      expiresInSec: expirationSeconds ?? undefined,
+      downloadable: true,
+    }
+    return { text: `${oncePrefix}[✨ sticker]${ephSuffix}`, media }
+  }
+  if ((unwrapped as LooseMsg).pollCreationMessage)
+    return { text: `[📊 poll: ${(unwrapped as LooseMsg).pollCreationMessage?.name ?? '?'}]${ephSuffix}` }
+  if ((unwrapped as LooseMsg).locationMessage)
+    return { text: `[📍 ${(unwrapped as LooseMsg).locationMessage?.name ?? 'location'}]${ephSuffix}` }
+  if ((unwrapped as LooseMsg).liveLocationMessage) return { text: `[📍 live location]${ephSuffix}` }
+  if ((unwrapped as LooseMsg).contactMessage)
+    return { text: `[📇 ${(unwrapped as LooseMsg).contactMessage?.displayName ?? 'contact'}]${ephSuffix}` }
+  try {
+    const kind = getContentType(unwrapped as Parameters<typeof getContentType>[0])
+    if (kind) {
+      if (viewOnce || ephemeral) return { text: `${oncePrefix}[${String(kind)}]${ephSuffix}` }
+      return { text: `[${String(kind)}]` }
+    }
+  } catch {
+    // fall through
+  }
+  if (viewOnce) return { text: `${oncePrefix}[view-once message]${ephSuffix}`, media: { kind: 'image', viewOnce: true, ephemeral: ephemeral || undefined, downloadable: false } }
+  return { text: '' }
 }
 
 export class WaGateway {
@@ -169,6 +454,14 @@ export class WaGateway {
   private qrAttempt = 0
   private disposed = false
   private demoReplyIdx = 0
+  /** Raw proto per message for download/open (key `${jid}\n${id}`). mediaKey lives here, never logged. */
+  private mediaSources = new Map<string, proto.Message>()
+  /** Full live events for reupload-capable retry (only live messages). */
+  private mediaEvents = new Map<string, WaIncomingMessageEvent>()
+  /** Message id under the cursor per chat (synced from MessageList hover). */
+  private hoveredMedia = new Map<string, string>()
+  /** Last clicked media per chat — keyboard o/d/p prefers it. */
+  private activeMedia = new Map<string, string>()
 
   state: GatewayState = {
     phase: 'boot',
@@ -272,6 +565,196 @@ export class WaGateway {
     return t
   }
 
+  private mediaMapKey(jid: string, id: string): string {
+    return `${jid}\n${id}`
+  }
+
+  private rememberMedia(jid: string, id: string, message?: unknown, event?: WaIncomingMessageEvent | null): void {
+    try {
+      if (message && typeof message === 'object') {
+        this.mediaSources.set(this.mediaMapKey(jid, id), message as proto.Message)
+      }
+      if (event) this.mediaEvents.set(this.mediaMapKey(jid, id), event)
+    } catch {
+      // best-effort cache
+    }
+  }
+
+  getMessage(jid: string, id: string): WaMsg | undefined {
+    return this.threads.get(jid)?.messages.find((m) => m.id === id)
+  }
+
+  /** Most recent openable media in a thread (for `o/d/p` keyboard shortcuts). */
+  findLastMedia(jid: string): WaMsg | undefined {
+    const t = this.threads.get(jid)
+    if (!t) return undefined
+    for (let i = t.messages.length - 1; i >= 0; i -= 1) {
+      const m = t.messages[i]!
+      if (m.media && !m.media.unavailableKind && (m.media.downloadable || m.media.localPath)) return m
+    }
+    return undefined
+  }
+
+  setHoveredMedia(jid: string, id: string | null): void {
+    if (id) this.hoveredMedia.set(jid, id)
+    else this.hoveredMedia.delete(jid)
+  }
+
+  setActiveMedia(jid: string, id: string): void {
+    this.activeMedia.set(jid, id)
+  }
+
+  /** Cursor/click-directed media target: hovered → clicked → most recent. */
+  resolveMediaTarget(jid: string): WaMsg | undefined {
+    const t = this.threads.get(jid)
+    if (!t) return undefined
+    const pick = (id: string | undefined): WaMsg | undefined => {
+      if (!id) return undefined
+      const m = t.messages.find((x) => x.id === id)
+      if (m?.media && !m.media.unavailableKind && (m.media.downloadable || m.media.localPath)) return m
+      return undefined
+    }
+    return pick(this.hoveredMedia.get(jid)) ?? pick(this.activeMedia.get(jid)) ?? this.findLastMedia(jid)
+  }
+
+  /** Download (or reuse cached) media bytes to `.media/<chat>/<id>_<name>`. Returns absolute path. */
+  async ensureMediaFile(jid: string, id: string): Promise<string> {
+    const t = this.threads.get(jid)
+    const msg = t?.messages.find((m) => m.id === id)
+    if (!msg?.media) throw new Error('Message has no media')
+    if (msg.media.unavailableKind) {
+      if (msg.media.unavailableKind === 'view_once') throw new Error('View-once no longer available (already opened elsewhere)')
+      throw new Error('Media no longer available on server')
+    }
+    if (!msg.media.downloadable) throw new Error('This message type cannot be downloaded')
+    if (msg.media.localPath && existsSync(msg.media.localPath)) {
+      if (msg.media.viewOnce && !msg.media.opened) {
+        msg.media.opened = true
+        this.bump(t!)
+      }
+      return msg.media.localPath
+    }
+    if (this.state.demo) throw new Error('Demo mode: media download is disabled')
+    const client = this.client
+    if (!client) throw new Error('Not connected')
+    const key = this.mediaMapKey(jid, id)
+    const source = this.mediaSources.get(key)
+    if (!source) throw new Error('Media source expired (history message without proto). Ask sender to resend.')
+    // Fast-path: zapo can tell us there is nothing downloadable without I/O.
+    try {
+      const payload = resolveMediaPayload(source as never)
+      if (!payload) throw new Error('No downloadable media in this message')
+    } catch (e) {
+      if ((e as Error)?.message?.startsWith('No downloadable')) throw e
+      // ignore resolver errors — let download attempt surface the real cause
+    }
+    mkdirSync(MEDIA_DIR, { recursive: true })
+    const chatDir = resolvePath(MEDIA_DIR, sanitizeJidForPath(jid))
+    mkdirSync(chatDir, { recursive: true })
+    const mimeExt = extForMimetype(msg.media.mimetype)
+    const fallbackName =
+      msg.media.fileName ??
+      (msg.media.kind === 'image'
+        ? `photo${mimeExt || '.jpg'}`
+        : msg.media.kind === 'video' || msg.media.kind === 'gif'
+          ? `video${mimeExt || '.mp4'}`
+          : msg.media.kind === 'ptv'
+            ? `ptv${mimeExt || '.mp4'}`
+            : msg.media.kind === 'voice' || msg.media.kind === 'audio'
+              ? `audio${mimeExt || '.ogg'}`
+              : msg.media.kind === 'sticker'
+                ? `sticker${mimeExt || '.webp'}`
+                : `file${mimeExt || ''}`)
+    const fileName = `${sanitizeBase(id)}_${sanitizeBase(fallbackName)}`
+    const dest = resolvePath(chatDir, fileName)
+    const dlSource = this.mediaEvents.get(key) ?? (source as never)
+    try {
+      await client.message.downloadToFile(dlSource as never, dest)
+    } catch (err) {
+      const msgText = (err as Error)?.message ?? String(err)
+      const looksExpired = /404|410|not.?found|expired|no such|gone/i.test(msgText)
+      const liveEvent = this.mediaEvents.get(key)
+      if (looksExpired && liveEvent) {
+        try {
+          this.set({ note: 'Media expired — requesting reupload…' })
+          await client.message.requestMediaReupload(liveEvent as never)
+          await client.message.downloadToFile(liveEvent as never, dest)
+        } catch (reErr) {
+          throw new Error(`Download failed even after reupload: ${errorMessage(reErr) || msgText}`)
+        }
+      } else {
+        throw new Error(`Download failed: ${msgText}`)
+      }
+    }
+    msg.media.localPath = dest
+    if (msg.media.viewOnce) msg.media.opened = true
+    this.bump(t!)
+    return dest
+  }
+
+  async openMedia(jid: string, id: string): Promise<string> {
+    const path = await this.ensureMediaFile(jid, id)
+    openExternalFile(path)
+    return path
+  }
+
+  // --------------------------------------------------- voice-note playback UI
+
+  private playback: WaPlaybackState | null = null
+  private playbackTimer: ReturnType<typeof setTimeout> | null = null
+  private playbackChild: { kill(): void } | null = null
+  private playbackListeners = new Set<() => void>()
+
+  subscribePlayback = (listener: () => void): (() => void) => {
+    this.playbackListeners.add(listener)
+    return () => {
+      this.playbackListeners.delete(listener)
+    }
+  }
+
+  getPlaybackSnapshot = (): WaPlaybackState | null => this.playback
+
+  private setPlayback(p: WaPlaybackState | null): void {
+    this.playback = p
+    for (const listener of this.playbackListeners) listener()
+  }
+
+  private stopPlayback(): void {
+    if (this.playbackTimer !== null) {
+      clearTimeout(this.playbackTimer)
+      this.playbackTimer = null
+    }
+    this.playbackChild?.kill()
+    this.playbackChild = null
+    if (this.playback) this.setPlayback(null)
+  }
+
+  /** Play/pause toggle, like tapping a voice note on the phone. */
+  async togglePlayMedia(jid: string, id: string): Promise<'playing' | 'paused'> {
+    if (this.playback?.jid === jid && this.playback.id === id) {
+      this.stopPlayback()
+      return 'paused'
+    }
+    this.stopPlayback()
+    const path = await this.ensureMediaFile(jid, id)
+    const msg = this.getMessage(jid, id)
+    const durationSec = msg?.media?.durationSec ?? 0
+    this.setPlayback({ jid, id, durationSec, startedAtMs: Date.now() })
+    this.playbackChild = playAudioFile(path)
+    if (durationSec > 0) {
+      // The players report progress; end the UI state when the clip ends.
+      this.playbackTimer = setTimeout(() => {
+        this.playbackTimer = null
+        this.setPlayback(null)
+      }, durationSec * 1000 + 250)
+    }
+    return 'playing'
+  }
+
+  async downloadMedia(jid: string, id: string): Promise<string> {
+    return this.ensureMediaFile(jid, id)
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   async start(): Promise<void> {
@@ -326,6 +809,8 @@ export class WaGateway {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer)
     if (this.hydrateTimer !== null) clearTimeout(this.hydrateTimer)
     if (this.progressTimer !== null) clearTimeout(this.progressTimer)
+    if (this.playbackTimer !== null) clearTimeout(this.playbackTimer)
+    this.playbackChild?.kill()
     for (const timer of this.typingClearTimers.values()) clearTimeout(timer)
     try {
       await this.client?.disconnect()
@@ -391,6 +876,15 @@ export class WaGateway {
     client.on('message', (event) => {
       this.ingestMessage(event)
     })
+
+    try {
+      const anyOn = (client as unknown as { on: (ev: string, cb: (e: never) => void) => void }).on.bind(client)
+      anyOn('message_unavailable', ((event: never) => {
+        this.ingestUnavailable(event as unknown as WaIncomingUnavailableMessageEvent)
+      }) as never)
+    } catch {
+      // older zapo without message_unavailable — view-once fallback still works via placeholder
+    }
 
     client.on('history_sync_chunk', (event) => {
       const progress = typeof event.progress === 'number' ? event.progress : null
@@ -508,7 +1002,9 @@ export class WaGateway {
     const t = this.thread(jid)
     const id = event.key.id
     const ts = (event.timestampSeconds ?? Math.floor(Date.now() / 1000)) * 1000
-    const text = renderMessageText(event.message)
+    const described = describeMessage(event.message, event.expirationSeconds)
+    const text = described.text
+    if (described.media || event.message) this.rememberMedia(jid, id, event.message as unknown, event)
 
     if (event.pushName) {
       if (event.key.isGroup && event.key.participant && !event.key.fromMe) {
@@ -524,6 +1020,7 @@ export class WaGateway {
     const existing = t.messages.find((m) => m.id === id && m.fromMe === event.key.fromMe)
     if (existing) {
       if (text) existing.text = text
+      if (described.media) existing.media = described.media
       if (t.lastTs < ts) t.lastTs = ts
       this.bump(t)
       return
@@ -541,6 +1038,7 @@ export class WaGateway {
       text,
       ts,
       status: 'sent',
+      media: described.media ?? null,
     })
     t.typing = false
     t.lastTs = Math.max(t.lastTs, ts)
@@ -554,6 +1052,42 @@ export class WaGateway {
       }
     }
     this.bump(t)
+  }
+
+  private ingestUnavailable(event: WaIncomingUnavailableMessageEvent): void {
+    try {
+      const key = (event as unknown as { key?: { remoteJid?: string; id?: string; fromMe?: boolean; participant?: string; isGroup?: boolean } }).key
+      const jid = key?.remoteJid
+      if (!jid || isStatusBroadcastJid(jid) || isNewsletterJid(jid)) return
+      const t = this.thread(jid)
+      const id = key?.id ?? `unavail-${Date.now()}`
+      const ts = ((event as unknown as { timestampSeconds?: number }).timestampSeconds ?? Math.floor(Date.now() / 1000)) * 1000
+      const kind = (event as unknown as { kind?: string }).kind as WaMediaInfo['unavailableKind'] | undefined
+      const text =
+        kind === 'view_once'
+          ? '[👁️ view-once no longer available]'
+          : kind === 'hosted' || kind === 'bot'
+            ? '[media no longer available]'
+            : '[message no longer available — open on phone]'
+      if (t.messages.some((m) => m.id === id)) return
+      t.messages.push({
+        id,
+        fromMe: key?.fromMe === true,
+        senderJid: key?.participant,
+        text,
+        ts,
+        status: 'read',
+        media: { kind: 'image', unavailableKind: (kind ?? 'other') as NonNullable<WaMediaInfo['unavailableKind']>, downloadable: false },
+      })
+      t.lastTs = Math.max(t.lastTs, ts)
+      if (this.activeJid !== jid && !key?.fromMe) {
+        t.unread += 1
+        if (getSettings().bellOnNewMessage) process.stdout.write('\x07')
+      }
+      this.bump(t)
+    } catch {
+      // best-effort placeholder
+    }
   }
 
   private async markRead(event: WaIncomingMessageEvent): Promise<void> {
@@ -701,14 +1235,17 @@ export class WaGateway {
               if (t.messages.some((x) => x.id === m.id && x.fromMe === m.fromMe)) continue
               const participant = m.participantJid ?? m.senderJid
               if (participant && !t.senderNames[participant]) unnamedSenders.add(participant)
+              const decoded = decodeStoredMessageFull(m.messageBytes)
+              if (decoded.raw) this.rememberMedia(rec.jid, m.id, decoded.raw, null)
               t.messages.push({
                 id: m.id,
                 fromMe: m.fromMe,
                 senderJid: participant,
                 senderName: participant ? t.senderNames[participant] : undefined,
-                text: decodeStoredMessage(m.messageBytes),
+                text: decoded.text,
                 ts: m.timestampMs ?? Date.now(),
                 status: 'read',
+                media: decoded.media ?? null,
               })
               changed = true
             }
@@ -813,13 +1350,14 @@ export class WaGateway {
     const jid = (e.jid ?? e.newsletterJid ?? key?.remoteJid) as string | undefined
     if (!jid || !jid.endsWith('@newsletter')) return
     const inner = (e.message ?? e) as { message?: unknown }
-    const text = renderMessageText(inner.message ?? inner)
+    const described = describeMessage(inner.message ?? inner)
+    const text = described.text
     if (!text) return
     const t = this.thread(jid)
     const id = String(e.serverId ?? e.messageId ?? key?.id ?? `nl-live-${Date.now()}`)
     if (t.messages.some((m) => m.id === id)) return
     const tsSec = Number(e.timestampSeconds ?? e.timestamp ?? 0)
-    t.messages.push({ id, fromMe: e.fromMe === true, text, ts: tsSec > 0 ? tsSec * 1000 : Date.now(), status: 'read' })
+    t.messages.push({ id, fromMe: e.fromMe === true, text, ts: tsSec > 0 ? tsSec * 1000 : Date.now(), status: 'read', media: described.media ?? null })
     t.lastTs = Date.now()
     this.bump(t)
   }
@@ -1044,31 +1582,45 @@ export class WaGateway {
 
   private typingSentFor = new Map<string, ReturnType<typeof setTimeout>>()
 
-  /** Attach and send media — /img /vid /aud /vn /doc /stk from the input box. */
-  async sendMedia(jid: string, kind: MediaKind, rawPath: string, caption?: string): Promise<void> {
+  /** Attach and send media — /img /vid /gif /ptv /aud /vn /doc /stk from the input box. */
+  async sendMedia(jid: string, kind: MediaKind, rawPath: string, caption?: string, opts?: { viewOnce?: boolean }): Promise<void> {
     const client = this.client
     const t = this.thread(jid)
     const abs = expandHome(rawPath)
     const fileBase = basename(abs)
+    const viewOnce = opts?.viewOnce === true
+    const onceSuffix = viewOnce ? ' · 👁️ once' : ''
     const icons: Record<MediaKind, string> = {
       image: '[📷 photo]',
       video: '[🎬 video]',
+      gif: '[🎞️ gif]',
+      ptv: '[⭕ video note]',
       audio: '[🎧 audio]',
-      voice: '[🎧 voice note]',
+      voice: '[🎤 voice]',
       document: `[📄 ${fileBase}]`,
       sticker: '[✨ sticker]',
     }
-    const placeholder = caption ? `${icons[kind]} ${caption}` : icons[kind]!
+    const baseIcon = icons[kind] ?? '[📎 media]'
+    const placeholder = (caption ? `${baseIcon} ${caption}` : baseIcon) + onceSuffix
+
+    const mediaInfo: WaMediaInfo = {
+      kind: kind === 'voice' ? 'voice' : kind === 'gif' ? 'gif' : kind,
+      caption,
+      fileName: kind === 'document' ? fileBase : undefined,
+      viewOnce: viewOnce || undefined,
+      localPath: abs,
+      downloadable: false,
+    }
 
     if (this.state.demo) {
-      t.messages.push({ id: `demo-media-${Date.now()}`, fromMe: true, text: placeholder, ts: Date.now(), status: 'read' })
+      t.messages.push({ id: `demo-media-${Date.now()}`, fromMe: true, text: placeholder, ts: Date.now(), status: 'read', media: mediaInfo })
       t.lastTs = Date.now()
       this.bump(t)
       return
     }
 
     if (!client) {
-      t.messages.push({ id: `media-${Date.now()}`, fromMe: true, text: `${placeholder} · send failed: not connected`, ts: Date.now(), status: 'failed' })
+      t.messages.push({ id: `media-${Date.now()}`, fromMe: true, text: `${placeholder} · send failed: not connected`, ts: Date.now(), status: 'failed', media: mediaInfo })
       t.lastTs = Date.now()
       this.bump(t)
       return
@@ -1081,20 +1633,27 @@ export class WaGateway {
     }
 
     const pendingId = `media-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    t.messages.push({ id: pendingId, fromMe: true, text: placeholder, ts: Date.now(), status: 'pending' })
+    t.messages.push({ id: pendingId, fromMe: true, text: placeholder, ts: Date.now(), status: 'pending', media: mediaInfo })
     t.lastTs = Date.now()
     this.bump(t)
 
     const mimetype = guessMimetype(abs, kind)
+    const sendOpts = viewOnce ? { viewOnce: true } : undefined
     try {
       let content: Record<string, unknown>
       if (kind === 'image') content = { type: 'image', media: abs, mimetype, caption }
-      else if (kind === 'video') content = { type: 'video', media: abs, mimetype, caption }
+      else if (kind === 'video') {
+        const isGif = extname(abs).toLowerCase() === '.gif'
+        content = isGif
+          ? { type: 'video', media: abs, mimetype: mimetype === 'application/octet-stream' ? 'image/gif' : mimetype, caption, gifPlayback: true }
+          : { type: 'video', media: abs, mimetype, caption }
+      } else if (kind === 'gif') content = { type: 'video', media: abs, mimetype: mimetype === 'application/octet-stream' ? 'image/gif' : mimetype, caption, gifPlayback: true }
+      else if (kind === 'ptv') content = { type: 'ptv', media: abs, mimetype }
       else if (kind === 'voice') content = { type: 'audio', media: abs, mimetype, ptt: true }
       else if (kind === 'audio') content = { type: 'audio', media: abs, mimetype }
       else if (kind === 'sticker') content = { type: 'sticker', media: abs, mimetype: mimetype === 'application/octet-stream' ? 'image/webp' : mimetype }
       else content = { type: 'document', media: abs, mimetype, fileName: fileBase, caption }
-      const result = await client.message.send(jid, content as never)
+      const result = await client.message.send(jid, content as never, sendOpts as never)
       const msg = t.messages.find((m) => m.id === pendingId)
       if (msg) {
         msg.id = result.id
@@ -1327,10 +1886,9 @@ export class WaGateway {
       {
         name: 'Photography Club',
         jid: '120363000000000003@g.us',
-        unread: 3,
-        msgs: [          [false, 'Gilang', '[📷 photo] golden hour today was unreal', now - 8 * H],
+        unread: 2,
+        msgs: [
           [false, 'Mega', '[🎬 video] the timelapse version', now - 7 * H],
-          [true, '', '[🎧 voice message]', now - 6 * H],
           [false, 'Gilang', '[📊 poll: best edit?] · 12 votes', now - 5 * H],
         ],
       },
@@ -1352,6 +1910,7 @@ export class WaGateway {
           ts,
           status: 'read',
           system: !fromMe && !sender,
+          media: inferDemoMedia(text),
         })
         t.lastTs = Math.max(t.lastTs, ts)
       }
@@ -1364,13 +1923,49 @@ export class WaGateway {
     channel.unread = 2
     channel.messages.push(
       { id: 'demo-chan-2', fromMe: false, text: 'v0.4 — channels are here: read, post, swipe 👆', ts: now - 2 * H, status: 'read' },
-      { id: 'demo-chan-1', fromMe: true, text: 'media attach landed: /img /vid /aud /vn /doc /stk <file>', ts: now - H, status: 'read' },
+      { id: 'demo-chan-1', fromMe: true, text: 'media attach: /img /vid /gif /ptv /aud /vn /doc /stk <file> [| caption] [--once]', ts: now - H, status: 'read' },
     )
     channel.lastTs = now - H
     this.viewDirty = true
+    this.seedDemoMedia()
     this.pushStep('Demo mode — sample conversations loaded')
     this.set({ phase: 'online', me: '628999000001@s.whatsapp.net' })
     this.scheduleDemoEvents()
+  }
+
+  /**
+   * Demo media: prefers the bundled real assets in assets/demo (a golden-hour
+   * photo that renders inline in the terminal + a spoken voice note) and falls
+   * back to generated files — either way open/play/download work end-to-end.
+   */
+  private seedDemoMedia(): void {
+    try {
+      const fallback = ensureDemoAssets(resolvePath(MEDIA_DIR, 'demo'))
+      const photoPath = existsSync(BUNDLED_DEMO_PHOTO) ? BUNDLED_DEMO_PHOTO : fallback.photoPath
+      const voicePath = existsSync(BUNDLED_DEMO_VOICE) ? BUNDLED_DEMO_VOICE : fallback.voicePath
+      const jid = '120363000000000003@g.us'
+      const t = this.thread(jid)
+      const now = Date.now()
+      const M = 60_000
+      const items: WaMsg[] = [
+        { id: 'demo-media-photo', fromMe: false, senderJid: jid, senderName: 'Gilang', text: '[📷 photo] golden hour today was unreal', ts: now - 30 * M, status: 'read', media: { kind: 'image', caption: 'golden hour today was unreal', mimetype: 'image/png', downloadable: true, localPath: photoPath } },
+        { id: 'demo-media-voice', fromMe: false, senderJid: jid, senderName: 'Mega', text: '[🎤 voice note]', ts: now - 20 * M, status: 'read', media: { kind: 'voice', isPtt: true, durationSec: wavDurationSec(voicePath) || 2, mimetype: 'audio/wav', downloadable: true, localPath: voicePath } },
+      ]
+      let changed = false
+      for (const m of items) {
+        if (t.messages.some((x) => x.id === m.id)) continue
+        t.messages.push(m)
+        t.lastTs = Math.max(t.lastTs, m.ts)
+        t.unread += 1
+        changed = true
+      }
+      if (changed) {
+        t.messages.sort((a, b) => a.ts - b.ts)
+        this.bump(t)
+      }
+    } catch {
+      // demo assets are best-effort — placeholders still render
+    }
   }
 
   private scheduleDemoEvents(): void {
@@ -1502,25 +2097,24 @@ export class WaGateway {
 }
 
 export function renderMessageText(message: unknown): string {
-  const m = (message ?? null) as LooseMsg | null
-  if (!m) return ''
-  if (m.conversation) return m.conversation
-  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text
-  if (m.imageMessage) return withCaption('[📷 photo]', m.imageMessage.caption)
-  if (m.videoMessage) return withCaption(m.videoMessage.gifPlayback ? '[🎞️ gif]' : '[🎬 video]', m.videoMessage.caption)
-  if (m.audioMessage) return '[🎧 voice message]'
-  if (m.documentMessage) return `[📄 ${m.documentMessage.fileName ?? 'document'}]`
-  if (m.stickerMessage) return '[✨ sticker]'
-  if (m.pollCreationMessage) return `[📊 poll: ${m.pollCreationMessage.name ?? '?'}]`
-  if (m.locationMessage) return `[📍 ${m.locationMessage.name ?? 'location'}]`
-  if (m.liveLocationMessage) return '[📍 live location]'
-  if (m.contactMessage) return `[📇 ${m.contactMessage.displayName ?? 'contact'}]`
-  const kind = getContentType(m as Parameters<typeof getContentType>[0])
-  return kind ? `[${kind}]` : ''
+  return describeMessage(message).text
 }
 
 function withCaption(prefix: string, caption?: string | null): string {
   return caption ? `${prefix} ${caption}` : prefix
+}
+
+function inferDemoMedia(text: string): WaMediaInfo | null {
+  if (text.startsWith('[📷 photo]')) return { kind: 'image', caption: text.slice('[📷 photo]'.length).trim() || undefined, downloadable: false }
+  if (text.startsWith('[🎬 video]')) return { kind: 'video', caption: text.slice('[🎬 video]'.length).trim() || undefined, downloadable: false }
+  if (text.startsWith('[🎞️ gif]')) return { kind: 'gif', downloadable: false }
+  if (text.startsWith('[⭕ video note]')) return { kind: 'ptv', downloadable: false }
+  if (text.startsWith('[🎤 voice')) return { kind: 'voice', isPtt: true, durationSec: 23, downloadable: false }
+  if (text.startsWith('[🎧 audio')) return { kind: 'audio', downloadable: false }
+  if (text.startsWith('[📄 ')) return { kind: 'document', fileName: 'document', downloadable: false }
+  if (text.startsWith('[✨ sticker]')) return { kind: 'sticker', downloadable: false }
+  if (text.includes('👁️')) return { kind: 'image', viewOnce: true, downloadable: false }
+  return null
 }
 
 interface NewsletterNode {
@@ -1562,11 +2156,17 @@ function collectNewsletterMessages(node: NewsletterNode, out: Array<{ id?: strin
 }
 
 export function decodeStoredMessage(bytes?: Uint8Array): string {
-  if (!bytes || bytes.length === 0) return ''
+  return decodeStoredMessageFull(bytes).text
+}
+
+export function decodeStoredMessageFull(bytes?: Uint8Array): { text: string; media?: WaMediaInfo | null; raw?: proto.Message | null } {
+  if (!bytes || bytes.length === 0) return { text: '' }
   try {
-    return renderMessageText(proto.Message.decode(bytes))
+    const raw = proto.Message.decode(bytes) as unknown as proto.Message
+    const described = describeMessage(raw)
+    return { text: described.text, media: described.media ?? null, raw }
   } catch {
-    return ''
+    return { text: '' }
   }
 }
 

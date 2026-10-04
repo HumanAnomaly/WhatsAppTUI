@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useStdin, useStdout } from 'ink'
 import type { WriteStream } from 'node:tty'
 import { gateway } from './wa/gateway.js'
+import type { WaPlaybackState } from './wa/gateway.js'
 import { getSettings, subscribeSettings } from './config.js'
 import { SPINNER_FRAMES } from './theme.js'
 
@@ -13,6 +14,11 @@ export function useGateway() {
 /** Cached, identity-stable thread list — safe for memo comparisons. */
 export function useThreads() {
   return useSyncExternalStore(gateway.subscribe, gateway.getThreadsSnapshot)
+}
+
+/** The playing voice note, if any — only the player rows need to re-render. */
+export function usePlayback(): WaPlaybackState | null {
+  return useSyncExternalStore(gateway.subscribePlayback, gateway.getPlaybackSnapshot)
 }
 
 export function useSettings() {

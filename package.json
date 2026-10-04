@@ -1,6 +1,6 @@
 {
   "name": "whatsapptui",
-  "version": "0.1.0-alpha.1",
+  "version": "0.4.0-alpha.1",
   "description": "WhatsAppTUI is an experimental project built on `zapo-js`. It lets you use WhatsApp directly in the terminal.",
   "type": "module",
   "author": "HumanAnomaly",
@@ -34,6 +34,7 @@
   "dependencies": {
     "@zapo-js/store-sqlite": "^1.0.0",
     "ink": "^8.0.0",
+    "jpeg-js": "^0.4.4",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "zapo-js": "^1.0.0"

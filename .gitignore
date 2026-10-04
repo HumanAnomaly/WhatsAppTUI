@@ -8,6 +8,7 @@ opencode.json
 .opencode
 .config
 .auth
+.media
 .rawdata
 .testproto
 .example

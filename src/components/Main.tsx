@@ -15,10 +15,12 @@ const FILTER_ORDER: ChatFilter[] = ['all', 'groups', 'direct', 'channels']
 /** Below this many columns the app switches to the single-panel phone layout. */
 const MOBILE_BREAKPOINT = 76
 
-type MediaKind = 'image' | 'video' | 'audio' | 'voice' | 'document' | 'sticker'
+type MediaKind = 'image' | 'video' | 'ptv' | 'gif' | 'audio' | 'voice' | 'document' | 'sticker'
 const MEDIA_COMMANDS: Record<string, MediaKind> = {
   img: 'image',
   vid: 'video',
+  gif: 'gif',
+  ptv: 'ptv',
   aud: 'audio',
   vn: 'voice',
   doc: 'document',
@@ -179,6 +181,43 @@ export const Main = memo(function Main() {
     },
     [showToast],
   )
+  // Clicked media opens/plays immediately AND becomes the o/d/p target.
+  const onMediaOpen = useCallback(
+    (id: string) => {
+      if (screenRef.current !== 'main') return // a popup owns the pointer
+      const jid = activeJidRef.current
+      if (!jid) return
+      const msg = gateway.getMessage(jid, id)
+      if (!msg?.media) return
+      gateway.setActiveMedia(jid, id)
+      if (msg.media.viewOnce && !msg.media.opened) showToast('👁️ view-once: opening saves a copy')
+      const done = (p: string): void => {
+        showToast(`✓ opened: ${p}`)
+      }
+      const fail = (e: unknown): void => {
+        showToast(`media failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 80))
+      }
+      void gateway.openMedia(jid, id).then(done, fail)
+    },
+    [showToast],
+  )
+  // Clicking (or pressing p on) a voice note toggles play/pause, like the phone.
+  const onMediaPlay = useCallback(
+    (id: string) => {
+      if (screenRef.current !== 'main') return // a popup owns the pointer
+      const jid = activeJidRef.current
+      if (!jid) return
+      gateway.setActiveMedia(jid, id)
+      const fail = (e: unknown): void => {
+        showToast(`playback failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 80))
+      }
+      void gateway.togglePlayMedia(jid, id).then(
+        (r) => showToast(r === 'playing' ? '▶ playing voice note' : '⏸ paused'),
+        fail,
+      )
+    },
+    [showToast],
+  )
   const msgTop = mobile ? 4 : 5
 
   // Keep the chat-list window on the selection.
@@ -203,18 +242,30 @@ export const Main = memo(function Main() {
   const onSubmit = useCallback((text: string) => {
     const jid = activeJidRef.current
     if (!jid) return
-    // Attachment commands: /img /vid /aud /vn /doc /stk <path> [| caption]
-    const media = /^\/(img|vid|aud|vn|doc|stk)\s+(.+)$/i.exec(text)
+    // Attachment commands: /img /vid /gif /ptv /aud /vn /doc /stk <path> [| caption] [--once]
+    const media = /^\/(img|vid|gif|ptv|aud|vn|doc|stk)\s+(.+)$/i.exec(text)
     if (media) {
       const kind = MEDIA_COMMANDS[media[1]!.toLowerCase()]!
-      const [pathPart, captionPart] = media[2]!.split('|')
+      let rest = media[2] ?? ''
+      const viewOnce = /(^|\s)--once(\s|$)/.test(rest)
+      rest = rest.replace(/(^|\s)--once(\s|$)/g, ' ').trim()
+      const [pathPart, captionPart] = rest.split('|')
       const path = (pathPart ?? '').trim()
-      if (path) void gateway.sendMedia(jid, kind, path, captionPart?.trim() || undefined)
+      const captionRaw = captionPart?.trim() || undefined
+      const caption = captionRaw?.replace(/(^|\s)--once(\s|$)/g, ' ').trim() || undefined
+      if (viewOnce && kind !== 'image' && kind !== 'video' && kind !== 'gif' && kind !== 'audio' && kind !== 'voice' && kind !== 'ptv') {
+        showToast('--once only works for image/video/audio/voice')
+        return
+      }
+      if (path) {
+        if (viewOnce) showToast('👁️ view-once: receiver opens once — TUI saves a copy')
+        void gateway.sendMedia(jid, kind, path, caption, viewOnce ? { viewOnce: true } : undefined)
+      }
       return
     }
     void gateway.send(jid, text)
     setScroll(0)
-  }, [])
+  }, [showToast])
 
   const goBack = useCallback(() => setMobileView('list'), [])
 
@@ -232,6 +283,9 @@ export const Main = memo(function Main() {
     setListStart(0)
   }, [])
   const closeSearch = useCallback(() => {
+    // Commit the previewed result: while searching, `active` follows the top
+    // match, and closing (Enter/Esc) keeps that chat selected.
+    setSelJid(activeJidRef.current)
     setSearchOpen(false)
     setQuery('')
   }, [])
@@ -333,9 +387,9 @@ export const Main = memo(function Main() {
           const idx = g.start + Math.floor((row - g.listTop) / 2)
           const jid = searchedRef.current[idx]?.jid
           if (jid) {
+            closeSearch() // commit first, then the tapped chat wins
             setSelJid(jid) // tap a chat = open it, like the phone app
             setMobileView('chat')
-            closeSearch()
           }
         }
         return
@@ -426,8 +480,8 @@ export const Main = memo(function Main() {
       }
       if (key.return && mobile && mobileView === 'list') {
         if (active) {
-          setMobileView('chat')
           closeSearch()
+          setMobileView('chat')
         }
         return
       }
@@ -455,6 +509,41 @@ export const Main = memo(function Main() {
       }
       if (key.ctrl && input === 'o' && activeJid) {
         gateway.setScreen('chatMenu')
+        return
+      }
+      // Media shortcuts (only when the input is empty so typing is never stolen):
+      // o = open in OS viewer, d = download to .media, p = play voice/audio.
+      // Target = hovered media → clicked media → most recent media.
+      if (!key.ctrl && !key.meta && !searchOpen && !hasDraftRef.current) {
+        const k = input.toLowerCase()
+        if (k === 'o' || k === 'd' || k === 'p') {
+          const jid = activeJidRef.current
+          if (!jid) return
+          const last = gateway.resolveMediaTarget(jid)
+          if (!last) {
+            showToast('no media here — hover or click a media message first')
+            return
+          }
+          if (k === 'p' && last.media?.kind !== 'voice' && last.media?.kind !== 'audio') {
+            showToast('last media is not audio — o to open, d to save')
+            return
+          }
+          if (last.media?.viewOnce && !last.media.opened) {
+            showToast('👁️ view-once: opening saves a copy')
+          } else {
+            showToast(k === 'o' ? 'opening media…' : k === 'd' ? 'saving media…' : '▶ voice note…')
+          }
+          const done = (p: string): void => {
+            showToast(`✓ ${k === 'd' ? 'saved' : 'opened'}: ${p}`)
+          }
+          const fail = (e: unknown): void => {
+            showToast(`media failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 80))
+          }
+          if (k === 'o') void gateway.openMedia(jid, last.id).then(done, fail)
+          else if (k === 'd') void gateway.downloadMedia(jid, last.id).then(done, fail)
+          else onMediaPlay(last.id)
+          return
+        }
       }
     },
     { isActive: isTTY && state.screen === 'main' },
@@ -495,7 +584,7 @@ export const Main = memo(function Main() {
         <Box flexDirection="column" height={bodyHeight}>
           <ChatHeader thread={active} rev={active?.rev ?? 0} width={cols} mobile hoverBack={hoverBack} hoverKebab={hoverKebab} />
           <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, cols))}</Text>
-          <MessageList thread={active} rev={active?.rev ?? 0} width={cols} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} />
+          <MessageList thread={active} rev={active?.rev ?? 0} width={cols} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} onMediaOpen={onMediaOpen} onMediaPlay={onMediaPlay} />
           <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, cols))}</Text>
           <InputLine
             key={activeJid ?? 'no-chat'}
@@ -508,7 +597,7 @@ export const Main = memo(function Main() {
             onDraftChange={onDraftChange}
           />
           <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
-            {toast ? ` ${toast}` : ' Ctrl+K help · click a message to copy'}
+            {toast ? ` ${toast}` : ' Ctrl+K help · p play voice · click: copy / open / play'}
           </Text>
         </Box>
       ) : (
@@ -531,7 +620,7 @@ export const Main = memo(function Main() {
           <Box flexDirection="column" width={msgAreaWidth} borderStyle="round" borderColor={theme.border}>
             <ChatHeader thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} hoverKebab={hoverKebab} />
             <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, msgAreaWidth - 2))}</Text>
-            <MessageList thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} />
+            <MessageList thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} onMediaOpen={onMediaOpen} onMediaPlay={onMediaPlay} />
             <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, msgAreaWidth - 2))}</Text>
             {/* key: remount per chat so drafts never leak across conversations */}
             <InputLine
@@ -543,7 +632,7 @@ export const Main = memo(function Main() {
               onDraftChange={onDraftChange}
             />
             <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
-              {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · click a message to copy it'}
+              {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · p play voice · click: copy / open / play'}
             </Text>
           </Box>
         </Box>

@@ -13,7 +13,8 @@ const KEYS: Array<[string, string]> = [
   ['Enter', 'send message · open chat'],
   ['Esc', 'clear draft · back / close'],
   ['Editing', '← → cursor · Ctrl+A/E ends · Ctrl+W word · Ctrl+U clear'],
-  ['/img … /stk', 'attach media: /img <file> [| caption]'],
+  ['/img /vid…', 'attach: /img /vid /gif /ptv /aud /vn /doc /stk <file> [| cap] [--once]'],
+  ['o / d / p', 'open · download · play last media (empty input)'],
   ['Ctrl+O', 'chat options: pin, mute, read, archive, info'],
   ['Ctrl+P', 'profile & privacy'],
   ['Ctrl+S', 'settings'],
@@ -22,7 +23,8 @@ const KEYS: Array<[string, string]> = [
 
 const MOUSE: Array<[string, string]> = [
   ['Click chat', 'open that conversation'],
-  ['Click message', 'copy its text'],
+  ['Click message', 'copy text · open/play media'],
+  ['Click media', 'open photo/video · play voice · selects o/d/p target'],
   ['Click Archived', 'enter / leave the archived folder'],
   ['Wheel / swipe', 'scroll the chat list or history'],
   ['Hover', 'highlight chats, messages, buttons'],

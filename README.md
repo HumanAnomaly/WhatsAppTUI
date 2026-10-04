@@ -70,7 +70,29 @@ You can also press `P` on the QR screen to switch to an 8-character pairing code
 | `Ctrl+P` | Profile & privacy |
 | `Ctrl+S` | Settings |
 | `Ctrl+K` | Help popup |
+| `o` / `d` / `p` | Open · download · play last media (empty input) |
 | `Ctrl+C` | Quit |
+
+## Attachments
+
+Send media from the input box:
+
+| Command | Sends |
+|---|---|
+| `/img <file> [\| caption] [--once]` | Photo (view-once with `--once`) |
+| `/vid <file> [\| caption] [--once]` | Video (`.gif` sends as GIF) |
+| `/gif <file> [\| caption]` | GIF |
+| `/ptv <file>` | Round video note |
+| `/aud <file> [--once]` | Audio |
+| `/vn <file> [--once]` | Voice note (opus) |
+| `/doc <file> [\| caption]` | Document |
+| `/stk <file>` | Sticker |
+
+Incoming photos, videos, voice notes, view-once and other message types render
+as labeled placeholders. Click a media message to open it directly (voice notes
+play on click), or press `o` to open the latest media in your OS viewer,
+`d` to save it under `.media/`, `p` to play voice/audio (`mpv`/`ffplay` when
+available). Hovering or clicking a media message also aims `o/d/p` at it. View-once messages show a `👁️ Once` badge and a copy warning.
 
 ## Note
 
