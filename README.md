@@ -45,15 +45,8 @@ On the first launch, WhatsAppTUI will display a QR code.
 On your phone, open:
 
 **WhatsApp → Linked devices → Link a device**
-
 You can also press `P` on the QR screen to switch to an 8-character pairing code.
 
-## Usage
-
-| Command | Description |
-|---|---|
-| `pnpm start` | Start WhatsAppTUI and connect your account |
-| `pnpm run demo` | Run the demo with sample chats and scripted replies |
 
 ## Shortcuts
 
@@ -67,9 +60,10 @@ You can also press `P` on the QR screen to switch to an 8-character pairing code
 | `Enter` | Send message · open chat |
 | `Esc` | Clear draft · back / close |
 | `Ctrl+O` | Chat options: pin, mute, read, archive, info |
-| `Ctrl+P` | Profile & privacy |
-| `Ctrl+S` | Settings |
+| `Ctrl+S` | Settings popup (or click `⚙` top-right) |
+| `←` / `→` | Change the selected setting value (in Settings) |
 | `Ctrl+K` | Help popup |
+| `i` | Group / contact / channel info panel (empty input, or click the chat title) |
 | `o` / `d` / `p` | Open · download · play last media (empty input) |
 | `Ctrl+C` | Quit |
 

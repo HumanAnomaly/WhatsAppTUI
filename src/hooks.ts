@@ -4,7 +4,7 @@ import type { WriteStream } from 'node:tty'
 import { gateway } from './wa/gateway.js'
 import type { WaPlaybackState } from './wa/gateway.js'
 import { getSettings, subscribeSettings } from './config.js'
-import { SPINNER_FRAMES } from './theme.js'
+import { SPINNER_FRAMES, snapshotTheme, subscribeTheme, type Theme } from './theme.js'
 
 /** Full gateway state — use in top-level screens only; gate heavy children with memo + rev. */
 export function useGateway() {
@@ -23,6 +23,11 @@ export function usePlayback(): WaPlaybackState | null {
 
 export function useSettings() {
   return useSyncExternalStore(subscribeSettings, getSettings)
+}
+
+/** Live theme — re-renders every second while the animated `rgb` theme is on. */
+export function useTheme(): Theme {
+  return useSyncExternalStore(subscribeTheme, snapshotTheme)
 }
 
 /** Terminal size with sane fallbacks (Ink 8 types stdout as a plain stream). */

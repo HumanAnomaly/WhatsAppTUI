@@ -1,9 +1,8 @@
 import { memo, useEffect, useRef } from 'react'
 import { Box, Text } from 'ink'
-import { currentTheme } from '../theme.js'
-import { displayJid, formatFullTime, visualWidth } from '../format.js'
+import { chatKindIcon, displayJid, formatFullTime, visualWidth } from '../format.js'
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
-import { usePlayback, useTicker } from '../hooks.js'
+import { usePlayback, useTheme, useTicker } from '../hooks.js'
 import { gateway, formatMediaDuration, type WaMsg, type WaThread } from '../wa/gateway.js'
 import { imageCellSize, imageInfo, renderImageCells, type ImageCells } from '../media.js'
 
@@ -23,7 +22,6 @@ function ticks(msg: WaMsg): string {
   return ' ✓'
 }
 
-/** A run of consecutive messages from the same sender, rendered as one unit. */
 interface MsgBlock {
   key: string
   senderKey: string
@@ -69,8 +67,6 @@ interface BubbleProps {
   width: number
 }
 
-// ---- inline image rendering (PNG local paths; graceful text fallback) ----
-
 const imgColsFor = (maxWidth: number): number => Math.max(12, Math.min(44, maxWidth - 6))
 
 const cellsCache = new Map<string, ImageCells | null>()
@@ -106,11 +102,10 @@ const ImageCellsView = memo(function ImageCellsView({ cells }: { cells: ImageCel
 function mediaMsgRows(m: WaMsg, maxWidth: number, rowsFor: (text: string) => number): number {
   const media = m.media!
   if (media.kind === 'voice' || media.kind === 'audio') {
-    // Player row + meta row; the bar width adapts so it stays on one line.
     return rowsFor(voiceRowText(m, maxWidth, true, media.durationSec ?? 0)) + 1
   }
   const info = media.localPath ? imageInfo(media.localPath) : null
-  if (media.kind !== 'image' || !info) return rowsFor(m.text) + 1 // text bubble + meta line
+  if (media.kind !== 'image' || !info) return rowsFor(m.text) + 1
   const capRows = media.caption ? rowsFor(media.caption) : 0
   return imageCellSize(info.width, info.height, imgColsFor(maxWidth)).rows + capRows + 1
 }
@@ -141,7 +136,7 @@ function voiceRowText(msg: WaMsg, maxWidth: number, playing: boolean, elapsed: n
 }
 
 const VoiceRow = memo(function VoiceRow({ msg, hovered, width }: { msg: WaMsg; hovered: boolean; width: number }) {
-  const theme = currentTheme()
+  const theme = useTheme()
   const pb = usePlayback()
   const active = pb !== null && pb.id === msg.id
   // Tick only while this row is the playing one.
@@ -160,7 +155,7 @@ const VoiceRow = memo(function VoiceRow({ msg, hovered, width }: { msg: WaMsg; h
 })
 
 const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps) {
-  const theme = currentTheme()
+  const theme = useTheme()
   void status // memo contract: re-render when delivery status changes
   const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
   const inBg = hovered ? theme.bubbleInHover : theme.bubbleIn
@@ -182,7 +177,6 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
     </Text>
   )
 
-  // Voice notes render a WhatsApp-style player row (▶/⏸ + progress bar).
   if (msg.media?.kind === 'voice' || msg.media?.kind === 'audio') {
     return (
       <Box paddingX={1} flexDirection="row" justifyContent={msg.fromMe ? 'flex-end' : 'flex-start'}>
@@ -194,7 +188,6 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
     )
   }
 
-  // An image with a decodable local file renders inline above its caption.
   const imgCells =
     msg.media?.kind === 'image' && msg.media.localPath
       ? imageCellsFor(msg.media.localPath, imgColsFor(maxWidth))
@@ -235,18 +228,13 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
 
 interface MessageListProps {
   thread: WaThread | null
-  /** Thread revision — the memo key that keeps this pane live. */
   rev: number
   width: number
   height: number
   scrollOffset: number
-  /** 0-based screen row where this list begins (hover/click mapping). */
   top: number
-  /** Called when a message is clicked — the hovered message is copied. */
   onCopy?: (text: string) => void
-  /** Called when a MEDIA message is clicked — opens (or plays) it instead of copying. */
   onMediaOpen?: (id: string) => void
-  /** Called when a VOICE NOTE is clicked — toggles play/pause, like the phone. */
   onMediaPlay?: (id: string) => void
 }
 
@@ -259,14 +247,13 @@ interface LineSpan {
 
 export const MessageList = memo(function MessageList({ thread, rev, width, height, scrollOffset, top, onCopy, onMediaOpen, onMediaPlay }: MessageListProps) {
   void rev
-  const theme = currentTheme()
+  const theme = useTheme()
   const hover = useHover()
   const hoverRow = hover ? hover.y - 1 - top : -1
   const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
   const rowsFor = (text: string): number =>
     Math.max(1, Math.ceil(visualWidth(` ${text} `) / Math.max(10, maxWidth - 2)))
 
-  // Pass 1 — layout: map every message to its line span inside the pane.
   const blocks: Array<MsgBlock | WaMsg> = []
   const lineMap: LineSpan[] = []
   if (thread && thread.messages.length > 0) {
@@ -294,14 +281,12 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
   }
   const hoveredId = hoverRow >= 0 ? lineMap.find((l) => hoverRow >= l.start && hoverRow <= l.end)?.id : undefined
 
-  // Sync cursor position so keyboard o/d/p prefers the hovered media.
   useEffect(() => {
     if (!thread) return
     gateway.setHoveredMedia(thread.jid, hoveredId ?? null)
     return () => gateway.setHoveredMedia(thread.jid, null)
   }, [thread, hoveredId])
 
-  // Pass 2 — render.
   const items: Array<{ key: string; node: React.ReactNode }> = []
   if (!thread || thread.messages.length === 0) {
     items.push({
@@ -356,13 +341,11 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
         ? 'loading older messages…'
         : ''
 
-  // Click a message = copy it — media behaves like the phone instead: images
-  // open, voice notes toggle play/pause (copying a "[📷 photo]" placeholder is
-  // useless).
   const stateRef = useRef({ lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread })
   stateRef.current = { lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread }
   const onMouse = (e: MouseEvt): void => {
     if (e.kind !== 'click') return
+    if (gateway.getSnapshot().screen !== 'main') return // a popup owns the pointer
     const row = e.y - 1 - stateRef.current.top
     const hit = stateRef.current.lineMap.find((l) => row >= l.start && row <= l.end)
     if (!hit) return
@@ -388,9 +371,10 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
 
 export const ChatHeader = memo(function ChatHeader({ thread, rev, width, mobile = false, hoverBack = false, hoverKebab = false }: { thread: WaThread | null; rev: number; width: number; mobile?: boolean; hoverBack?: boolean; hoverKebab?: boolean }) {
   void rev
-  const theme = currentTheme()
+  const theme = useTheme()
   const isGroup = thread?.jid.endsWith('@g.us') ?? false
-  const title = (thread ? thread.name : mobile ? 'select a chat' : 'WhatsAppTUI') + (thread?.typing ? ' typing…' : '')
+  const icon = thread ? `${chatKindIcon(thread.jid)} ` : ''
+  const title = icon + (thread ? thread.name : mobile ? 'select a chat' : 'WhatsAppTUI') + (thread?.typing ? ' typing…' : '')
   const pad = Math.max(8, width - 6)
   return (
     <Box flexDirection="column" width={width - 2}>

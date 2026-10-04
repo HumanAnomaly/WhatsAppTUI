@@ -1,18 +1,18 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { currentTheme } from '../theme.js'
+import { panelBg } from '../theme.js'
 import { displayJid, formatClock } from '../format.js'
-import { useGateway, useIsTTY, useTerminalSize, useThreads, useTicker } from '../hooks.js'
+import { useGateway, useIsTTY, useSettings, useTerminalSize, useTheme, useThreads, useTicker } from '../hooks.js'
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
 import { Screen } from './Screen.js'
 import { copyToClipboard } from '../clipboard.js'
 import { gateway, type WaThread } from '../wa/gateway.js'
 import { ChatList, CHIP_ZONES, type ChatFilter } from './ChatList.js'
 import { ChatHeader, MessageList } from './ChatView.js'
+import { InfoPanel } from './InfoPanel.js'
 import { InputLine } from './InputBox.js'
 
 const FILTER_ORDER: ChatFilter[] = ['all', 'groups', 'direct', 'channels']
-/** Below this many columns the app switches to the single-panel phone layout. */
 const MOBILE_BREAKPOINT = 76
 
 type MediaKind = 'image' | 'video' | 'ptv' | 'gif' | 'audio' | 'voice' | 'document' | 'sticker'
@@ -37,7 +37,7 @@ const matchesFilter = (t: WaThread, f: ChatFilter): boolean =>
 
 const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobile: boolean; hoverMenu?: boolean }) {
   const state = useGateway()
-  const theme = currentTheme()
+  const theme = useTheme()
   useTicker(15_000)
   const status = state.demo ? (
     <Text color={theme.warn}>◈ demo</Text>
@@ -50,18 +50,19 @@ const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobil
   )
   if (mobile) {
     return (
-      <Text backgroundColor={theme.bg} wrap="truncate-end">
+      <Text wrap="truncate-end">
         <Text backgroundColor={hoverMenu ? theme.accent : undefined} color={hoverMenu ? 'black' : theme.accent} bold>{' ☰ '}</Text>
         <Text color={theme.accent} bold>WhatsAppTUI</Text>
         <Text color={theme.dimmer}> │ </Text>
         {status}
         <Text color={theme.dimmer}> · {formatClock(new Date())}</Text>
+        <Text color={theme.dimmer}>{' ⚙'}</Text>
       </Text>
     )
   }
   return (
     <Box justifyContent="space-between" paddingX={1}>
-      <Text backgroundColor={theme.bg}>
+      <Text>
         <Text color={theme.accent} bold>WhatsAppTUI</Text>
         <Text color={theme.dimmer}> │ </Text>
         {status}
@@ -69,9 +70,10 @@ const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobil
           <Text color={theme.dimmer}> · syncing history {Math.round(state.historyProgress)}%</Text>
         ) : null}
       </Text>
-      <Text backgroundColor={theme.bg}>
+      <Text>
         {state.me ? <Text color={theme.dim}>{displayJid(state.me)}</Text> : null}
         <Text color={theme.dimmer}>{state.me ? ' · ' : ''}{formatClock(new Date())}</Text>
+        <Text color={theme.dimmer} bold>{' ⚙'}</Text>
       </Text>
     </Box>
   )
@@ -82,7 +84,7 @@ export const Main = memo(function Main() {
   const threads = useThreads()
   const { cols, rows } = useTerminalSize()
   const isTTY = useIsTTY()
-  const theme = currentTheme()
+  const theme = useTheme()
   const mobile = cols < MOBILE_BREAKPOINT
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
   const [filter, setFilter] = useState<ChatFilter>('all')
@@ -94,15 +96,15 @@ export const Main = memo(function Main() {
   const [selJid, setSelJid] = useState<string | null>(() => state.activeJid)
   const [scroll, setScroll] = useState(0)
   const [listStart, setListStart] = useState(0)
+  const [showInfo, setShowInfo] = useState(false)
+  const prefs = useSettings()
+  const sidebarBg = panelBg(prefs.sidebarBg)
+  const chatBg = panelBg(prefs.chatBg)
 
-  // The archived folder is a separate dimension from the type filter, exactly
-  // like WhatsApp: the same chips apply inside it.
   const filtered = useMemo(
     () => threads.filter((t) => t.archived === archivedView && matchesFilter(t, filter)),
     [threads, filter, archivedView],
   )
-  // Search narrows the current view live across chat names, JIDs (phone
-  // numbers) and every message loaded into memory so far.
   const q = query.trim().toLowerCase()
   const searched = useMemo(() => {
     if (!q) return filtered
@@ -130,9 +132,7 @@ export const Main = memo(function Main() {
   archivedRef.current = archivedView
   const screenRef = useRef(state.screen)
   screenRef.current = state.screen
-  // Non-empty chat draft — InputLine reports flips; gates arrow navigation.
   const hasDraftRef = useRef(false)
-
   const archivedCount = useMemo(() => threads.reduce((n, t) => n + (t.archived ? 1 : 0), 0), [threads])
   const archivedRowShown = archivedCount > 0 || archivedView
 
@@ -140,22 +140,27 @@ export const Main = memo(function Main() {
   const msgRows = Math.max(2, mobile ? bodyHeight - 6 : bodyHeight - 8)
   const listRows = Math.max(4, bodyHeight - 2)
   const listWidth = mobile ? cols : Math.min(38, Math.max(24, Math.floor(cols * 0.34)))
-  const msgAreaWidth = mobile ? cols : Math.max(30, cols - listWidth)
+  const infoW = 30
+  // Inline 3rd column only when everything fits; otherwise the info panel
+  // floats above (same on mobile) so narrow terminals never break layout.
+  const infoInline = !mobile && active !== null && cols - listWidth - infoW >= 30
+  const msgAreaWidth = mobile ? cols : infoInline ? Math.max(30, cols - listWidth - infoW) : Math.max(30, cols - listWidth)
+  const chatEnd = listWidth + msgAreaWidth // 0-based exclusive end of the chat panel (desktop)
   const listMaxItems = Math.max(1, Math.floor((listRows - 1 - (archivedRowShown ? 1 : 0)) / 2))
 
-  // ---- cursor hover state ----
   const hover = useHover()
   const hoverRow = hover ? hover.y - 1 : -1
   const hoverX = hover ? hover.x : -1
   const hoverMenu = mobile && hoverRow === 0 && hoverX <= 3
   const hoverBack = mobile && mobileView === 'chat' && hoverRow === 1 && hoverX <= 4
-  const hoverKebab = (mobile ? mobileView === 'chat' && hoverRow === 1 : hoverRow === 2) && hoverX >= cols - 3
+  const hoverKebab = mobile
+    ? mobileView === 'chat' && hoverRow === 1 && hoverX >= cols - 5
+    : hoverRow === 2 && hoverX >= chatEnd - 5
   const hoverChip =
     mobile && mobileView === 'list' && !searchOpen && hoverRow === 1
       ? CHIP_ZONES.findIndex((c) => hoverX >= c.x0 && hoverX <= c.x1)
       : -1
   const hoverHint = hoverRow === rows - 1
-  // First list row (after title/chips and the optional Archived toggle row).
   const listTop = (mobile ? 2 : 3) + (archivedRowShown ? 1 : 0)
   const inList = !mobile || mobileView === 'list'
   let hoverIdx = -1
@@ -166,7 +171,6 @@ export const Main = memo(function Main() {
   const hoverArchived =
     inList && archivedRowShown && hoverRow === listTop - 1 && (mobile || hoverX - 1 < listWidth)
 
-  // ---- toast (shown in the hint row, no layout shift) ----
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showToast = useCallback((msg: string) => {
@@ -181,7 +185,6 @@ export const Main = memo(function Main() {
     },
     [showToast],
   )
-  // Clicked media opens/plays immediately AND becomes the o/d/p target.
   const onMediaOpen = useCallback(
     (id: string) => {
       if (screenRef.current !== 'main') return // a popup owns the pointer
@@ -201,7 +204,6 @@ export const Main = memo(function Main() {
     },
     [showToast],
   )
-  // Clicking (or pressing p on) a voice note toggles play/pause, like the phone.
   const onMediaPlay = useCallback(
     (id: string) => {
       if (screenRef.current !== 'main') return // a popup owns the pointer
@@ -220,7 +222,6 @@ export const Main = memo(function Main() {
   )
   const msgTop = mobile ? 4 : 5
 
-  // Keep the chat-list window on the selection.
   useEffect(() => {
     setListStart((s) => {
       if (selIdx < s) return selIdx
@@ -230,6 +231,7 @@ export const Main = memo(function Main() {
   }, [selIdx, listMaxItems])
 
   useEffect(() => {
+    setScroll(0) // fresh chat, fresh top — never carry another chat's offset
     hasDraftRef.current = false // fresh chat, fresh (empty) input
     if (activeJid) void gateway.activateChat(activeJid)
   }, [activeJid])
@@ -269,7 +271,6 @@ export const Main = memo(function Main() {
 
   const goBack = useCallback(() => setMobileView('list'), [])
 
-  // ---- search & folder actions (stable: setters + refs only) ----
   const applyFilter = useCallback((f: ChatFilter) => {
     setFilter(f)
     setSelJid(threadsRef.current.find((t) => t.archived === archivedRef.current && matchesFilter(t, f))?.jid ?? null)
@@ -283,8 +284,6 @@ export const Main = memo(function Main() {
     setListStart(0)
   }, [])
   const closeSearch = useCallback(() => {
-    // Commit the previewed result: while searching, `active` follows the top
-    // match, and closing (Enter/Esc) keeps that chat selected.
     setSelJid(activeJidRef.current)
     setSearchOpen(false)
     setQuery('')
@@ -297,13 +296,16 @@ export const Main = memo(function Main() {
     hasDraftRef.current = hasText
   }, [])
 
-  // Latest geometry for the mouse handler (stable callback, live values).
   const geo = useRef({
     mobile,
     mobileView,
     rows,
     cols,
     listWidth,
+    chatEnd,
+    infoW,
+    showInfo,
+    infoInline,
     listMaxItems,
     len: searched.length,
     start: listStart,
@@ -319,6 +321,10 @@ export const Main = memo(function Main() {
     rows,
     cols,
     listWidth,
+    chatEnd,
+    infoW,
+    showInfo,
+    infoInline,
     listMaxItems,
     len: searched.length,
     start: listStart,
@@ -333,10 +339,13 @@ export const Main = memo(function Main() {
     const row = e.y - 1
     const g = geo.current
 
-    // The help popup owns the pointer while it is open.
     if (g.screen !== 'main') return
 
-    // Touch-drag (Termux) / mouse drag scrolls whichever panel is under the finger.
+    if (g.showInfo && !g.infoInline) {
+      if (e.kind === 'click' && row === 0) setShowInfo(false)
+      return
+    }
+
     if (e.kind === 'drag') {
       const dy = e.dy ?? 0
       if (dy === 0) return
@@ -360,7 +369,11 @@ export const Main = memo(function Main() {
     }
     if (e.kind !== 'click') return
 
-    // Help is always one click away — the last screen row.
+    if (row === 0 && e.x >= g.cols - 2) {
+      gateway.setScreen('settings')
+      return
+    }
+
     if (row === g.rows - 1) {
       gateway.setScreen('help')
       return
@@ -368,7 +381,7 @@ export const Main = memo(function Main() {
 
     if (g.mobile) {
       if (row === 0 && e.x <= 3) {
-        setMobileView('list') // ☰ hamburger
+        setMobileView('list')
         return
       }
       if (g.mobileView === 'list') {
@@ -380,36 +393,45 @@ export const Main = memo(function Main() {
           return
         }
         if (g.archivedRowShown && row === g.listTop - 1) {
-          openFolder(!g.archivedView) // Archived ⇄ All chats toggle row
+          openFolder(!g.archivedView)
           return
         }
         if (row >= g.listTop) {
           const idx = g.start + Math.floor((row - g.listTop) / 2)
           const jid = searchedRef.current[idx]?.jid
           if (jid) {
-            closeSearch() // commit first, then the tapped chat wins
-            setSelJid(jid) // tap a chat = open it, like the phone app
+            closeSearch()
+            setSelJid(jid)
             setMobileView('chat')
           }
         }
         return
       }
-      // chat view
       if (row === 1) {
         if (e.x <= 4) {
-          setMobileView('list') // ‹ back
+          setMobileView('list')
           return
         }
-        if (e.x >= g.cols - 3) {
-          gateway.setScreen('chatMenu') // ⋮ kebab
+        if (e.x >= g.cols - 5) {
+          gateway.setScreen('chatMenu')
+          return
         }
+        if (activeJidRef.current) setShowInfo((v) => !v)
+        return
       }
       return
     }
 
-    // Desktop
-    if (row === 2 && e.x >= g.cols - 3) {
-      gateway.setScreen('chatMenu') // ⋮ kebab in the chat header
+    if (row === 2 && e.x >= g.chatEnd - 5) {
+      gateway.setScreen('chatMenu')
+      return
+    }
+    if (row === 2 && e.x - 1 >= g.chatEnd + 2 && e.x - 1 <= g.chatEnd + 6) {
+      setShowInfo(false)
+      return
+    }
+    if (row === 2 && e.x - 1 >= g.listWidth && e.x < g.chatEnd - 5) {
+      if (activeJidRef.current) setShowInfo((v) => !v)
       return
     }
     if (e.x - 1 < g.listWidth) {
@@ -499,10 +521,6 @@ export const Main = memo(function Main() {
         gateway.setScreen('settings')
         return
       }
-      if (key.ctrl && input === 'p') {
-        gateway.setScreen('profile')
-        return
-      }
       if (key.ctrl && input === 'k') {
         gateway.setScreen('help')
         return
@@ -511,11 +529,20 @@ export const Main = memo(function Main() {
         gateway.setScreen('chatMenu')
         return
       }
-      // Media shortcuts (only when the input is empty so typing is never stolen):
-      // o = open in OS viewer, d = download to .media, p = play voice/audio.
-      // Target = hovered media → clicked media → most recent media.
+      // Empty-input shortcuts (never steal typing):
+      // i = info panel, o = open in OS viewer, d = download to .media, p = play voice/audio.
+      // Media target = hovered media → clicked media → most recent media.
       if (!key.ctrl && !key.meta && !searchOpen && !hasDraftRef.current) {
         const k = input.toLowerCase()
+        if (k === 'i') {
+          // (Ctrl+I is Tab in terminals, so the plain key owns this.)
+          if (!activeJidRef.current) {
+            showToast('open a chat first')
+            return
+          }
+          setShowInfo((v) => !v)
+          return
+        }
         if (k === 'o' || k === 'd' || k === 'p') {
           const jid = activeJidRef.current
           if (!jid) return
@@ -565,23 +592,25 @@ export const Main = memo(function Main() {
     <Screen>
       <StatusBar mobile={mobile} hoverMenu={hoverMenu} />
       {mobile && mobileView === 'list' ? (
-        <ChatList
-          threads={searched}
-          selIdx={selIdx}
-          width={cols}
-          height={bodyHeight}
-          filter={filter}
-          start={listStart}
-          chips
-          hoverIdx={hoverIdx}
-          hoverChip={hoverChip}
-          archivedCount={archivedCount}
-          archivedView={archivedView}
-          hoverArchived={hoverArchived}
-          header={searchInput}
-        />
+        <Box height={bodyHeight} backgroundColor={sidebarBg}>
+          <ChatList
+            threads={searched}
+            selIdx={selIdx}
+            width={cols}
+            height={bodyHeight}
+            filter={filter}
+            start={listStart}
+            chips
+            hoverIdx={hoverIdx}
+            hoverChip={hoverChip}
+            archivedCount={archivedCount}
+            archivedView={archivedView}
+            hoverArchived={hoverArchived}
+            header={searchInput}
+          />
+        </Box>
       ) : mobile ? (
-        <Box flexDirection="column" height={bodyHeight}>
+        <Box flexDirection="column" height={bodyHeight} backgroundColor={chatBg}>
           <ChatHeader thread={active} rev={active?.rev ?? 0} width={cols} mobile hoverBack={hoverBack} hoverKebab={hoverKebab} />
           <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, cols))}</Text>
           <MessageList thread={active} rev={active?.rev ?? 0} width={cols} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} onMediaOpen={onMediaOpen} onMediaPlay={onMediaPlay} />
@@ -597,12 +626,12 @@ export const Main = memo(function Main() {
             onDraftChange={onDraftChange}
           />
           <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
-            {toast ? ` ${toast}` : ' Ctrl+K help · p play voice · click: copy / open / play'}
+            {toast ? ` ${toast}` : ' Ctrl+K help · i info · p play voice · click: copy / open / play'}
           </Text>
         </Box>
       ) : (
         <Box flexDirection="row" height={bodyHeight}>
-          <Box flexDirection="column" width={listWidth} borderStyle="round" borderColor={theme.border}>
+          <Box flexDirection="column" width={listWidth} borderStyle="round" borderColor={theme.border} backgroundColor={sidebarBg}>
             <ChatList
               threads={searched}
               selIdx={selIdx}
@@ -617,7 +646,7 @@ export const Main = memo(function Main() {
               header={searchInput}
             />
           </Box>
-          <Box flexDirection="column" width={msgAreaWidth} borderStyle="round" borderColor={theme.border}>
+          <Box flexDirection="column" width={msgAreaWidth} borderStyle="round" borderColor={theme.border} backgroundColor={chatBg}>
             <ChatHeader thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} hoverKebab={hoverKebab} />
             <Text color={theme.border} wrap="truncate-end">{'─'.repeat(Math.max(4, msgAreaWidth - 2))}</Text>
             <MessageList thread={active} rev={active?.rev ?? 0} width={msgAreaWidth} height={msgRows} scrollOffset={scroll} top={msgTop} onCopy={onCopy} onMediaOpen={onMediaOpen} onMediaPlay={onMediaPlay} />
@@ -632,11 +661,27 @@ export const Main = memo(function Main() {
               onDraftChange={onDraftChange}
             />
             <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
-              {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · p play voice · click: copy / open / play'}
+              {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · i info · p play voice · click: copy / open / play'}
             </Text>
           </Box>
+          {infoInline && active ? (
+            <Box flexDirection="column" width={infoW} borderStyle="round" borderColor={theme.border} backgroundColor={chatBg}>
+              <InfoPanel thread={active} rev={active.rev} width={infoW} />
+            </Box>
+          ) : null}
         </Box>
       )}
+      {showInfo && active && !infoInline ? (
+        <Box position="absolute" width={cols} height={rows} flexDirection="column" backgroundColor={chatBg ?? theme.bg} paddingX={1}>
+          <Text>
+            <Text color={theme.accent} bold>{'‹ back'}</Text>
+            <Text color={theme.dimmer}>{' · tap the top row or press i — close'}</Text>
+          </Text>
+          <Box flexDirection="column" alignItems="center">
+            <InfoPanel thread={active} rev={active.rev} width={cols - 2} />
+          </Box>
+        </Box>
+      ) : null}
     </Screen>
   )
 })

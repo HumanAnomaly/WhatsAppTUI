@@ -66,6 +66,40 @@ export function formatPairingCode(code: string): string {
   return code.match(/.{1,4}/g)?.join('-') ?? code
 }
 
+/**
+ * OSC 8 hyperlink — renders as a real clickable link in supporting terminals
+ * (Windows Terminal, WezTerm, Kitty, iTerm2, VS Code, …) and as plain text
+ * elsewhere. Ink measures it as zero-width, so centering is unaffected.
+ */
+export function hyperlink(url: string, label?: string): string {
+  const text = label ?? url
+  return `\u001B]8;;${url}\u001B\\${text}\u001B]8;;\u001B\\`
+}
+
+export type ChatKind = 'group' | 'channel' | 'direct'
+
+/** group (@g.us) vs channel (@newsletter) vs direct — drives icons and the info panel. */
+export function chatKindOf(jid: string): ChatKind {
+  if (jid.endsWith('@g.us')) return 'group'
+  if (jid.endsWith('@newsletter')) return 'channel'
+  return 'direct'
+}
+
+/** Distinct icon per chat kind (each renders 2 terminal cells wide). */
+export function chatKindIcon(jid: string): string {
+  const kind = chatKindOf(jid)
+  if (kind === 'group') return '👥'
+  if (kind === 'channel') return '📢'
+  return '👤'
+}
+
+export function chatKindLabel(jid: string): string {
+  const kind = chatKindOf(jid)
+  if (kind === 'group') return 'Group'
+  if (kind === 'channel') return 'Channel'
+  return 'Contact'
+}
+
 /** Rough terminal-cell width of a string (wide chars — emoji/CJK — count 2). */
 export function visualWidth(text: string): number {
   let width = 0

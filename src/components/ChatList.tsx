@@ -1,12 +1,12 @@
 import { memo, Fragment, type ReactNode } from 'react'
 import { Box, Text } from 'ink'
-import { currentTheme } from '../theme.js'
-import { formatMsgTime, padVisual, truncateVisual } from '../format.js'
+import { useTheme } from '../hooks.js'
+import { chatKindIcon, formatMsgTime, padVisual, truncateVisual, visualWidth } from '../format.js'
 import type { WaThread } from '../wa/gateway.js'
 
 export type ChatFilter = 'all' | 'groups' | 'direct' | 'channels'
 
-const CHIP_DEFS: Array<[ChatFilter, string]> = [['all', 'All'], ['groups', 'Groups'], ['direct', 'Direct'], ['channels', 'Channels']]
+const CHIP_DEFS: Array<[ChatFilter, string]> = [['all', 'All'], ['groups', '👥 Groups'], ['direct', '👤 Direct'], ['channels', '📢 Channels']]
 
 /** 1-based column ranges of the filter chips — must match ChipsRow exactly. */
 export const CHIP_ZONES = (() => {
@@ -20,7 +20,7 @@ export const CHIP_ZONES = (() => {
 })()
 
 export function ChipsRow({ filter, hoverChip = -1 }: { filter: ChatFilter; hoverChip?: number }) {
-  const theme = currentTheme()
+  const theme = useTheme()
   return (
     <Text>
       {' '}
@@ -56,28 +56,20 @@ interface ChatListProps {
   width: number
   height: number
   filter: ChatFilter
-  /** First visible index — owned by Main so mouse clicks can map to rows. */
   start: number
-  /** Phone layout: render filter chips instead of the plain title. */
   chips?: boolean
-  /** Row index under the cursor — gets a hover highlight. */
   hoverIdx?: number
-  /** Chip index under the cursor (phone layout). */
   hoverChip?: number
-  /** Cursor is on the Archived toggle row. */
   hoverArchived?: boolean
-  /** Number of archived chats — shows the toggle row when > 0. */
   archivedCount: number
-  /** Currently browsing the archived folder. */
   archivedView: boolean
-  /** Replaces the title/chips row — the search input. */
   header?: ReactNode
 }
 
 export const ChatList = memo(function ChatList({ threads, selIdx, width, height, filter, start, chips = false, hoverIdx = -1, hoverChip = -1, hoverArchived = false, archivedCount, archivedView, header }: ChatListProps) {
   const archivedRowShown = archivedCount > 0 || archivedView
   const maxItems = Math.max(1, Math.floor(Math.max(1, height - 1 - (archivedRowShown ? 1 : 0)) / 2))
-  const theme = currentTheme()
+  const theme = useTheme()
   const visible = threads.slice(start, start + maxItems)
   const innerWidth = width - 2
 
@@ -112,8 +104,10 @@ export const ChatList = memo(function ChatList({ threads, selIdx, width, height,
         const timeStr = t.messages.length > 0 ? formatMsgTime(t.messages[t.messages.length - 1]!.ts) : ''
         const badge = t.unread > 0 ? ` ${Math.min(t.unread, 99)} ` : ''
         const flags = (t.pinned ? '⚑ ' : '') + (t.muted ? '⊘ ' : '')
+        const icon = chatKindIcon(t.jid)
         const nameArea = Math.max(6, innerWidth - timeStr.length - badge.length)
-        const nameStr = padVisual(` ${selected || hovered ? '›' : ' '}${flags}${truncateVisual(t.name, Math.max(3, nameArea - flags.length - 2))}`, nameArea)
+        const prefix = ` ${selected || hovered ? '›' : ' '}${flags}${icon} `
+        const nameStr = padVisual(prefix + truncateVisual(t.name, Math.max(3, nameArea - visualWidth(prefix))), nameArea)
         const previewStr = padVisual(`   ${truncateVisual(threadPreview(t), Math.max(4, innerWidth - 3 - badge.length))}`, Math.max(4, innerWidth - badge.length))
         return (
           <Box key={t.jid} flexDirection="column">

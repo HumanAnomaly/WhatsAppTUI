@@ -1,7 +1,6 @@
 import { memo } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { currentTheme } from '../theme.js'
-import { useIsTTY, useTerminalSize } from '../hooks.js'
+import { useIsTTY, useTerminalSize, useTheme } from '../hooks.js'
 import { useMouse } from '../mouse.js'
 import { gateway } from '../wa/gateway.js'
 
@@ -15,14 +14,17 @@ const KEYS: Array<[string, string]> = [
   ['Editing', '← → cursor · Ctrl+A/E ends · Ctrl+W word · Ctrl+U clear'],
   ['/img /vid…', 'attach: /img /vid /gif /ptv /aud /vn /doc /stk <file> [| cap] [--once]'],
   ['o / d / p', 'open · download · play last media (empty input)'],
+  ['i', 'group / contact / channel info panel (empty input)'],
+  ['⚙ top right', 'open settings'],
   ['Ctrl+O', 'chat options: pin, mute, read, archive, info'],
-  ['Ctrl+P', 'profile & privacy'],
   ['Ctrl+S', 'settings'],
   ['Ctrl+K', 'this help · Ctrl+C quit'],
 ]
 
 const MOUSE: Array<[string, string]> = [
   ['Click chat', 'open that conversation'],
+  ['Click chat title', 'open the info panel (tap again to close)'],
+  ['Click ⚙', 'open settings'],
   ['Click message', 'copy text · open/play media'],
   ['Click media', 'open photo/video · play voice · selects o/d/p target'],
   ['Click Archived', 'enter / leave the archived folder'],
@@ -30,12 +32,8 @@ const MOUSE: Array<[string, string]> = [
   ['Hover', 'highlight chats, messages, buttons'],
 ]
 
-/**
- * Modal shortcut sheet floating above the main screen — Main stays mounted,
- * so the chat list and scroll position are untouched behind it.
- */
 export const HelpPopup = memo(function HelpPopup() {
-  const theme = currentTheme()
+  const theme = useTheme()
   const isTTY = useIsTTY()
   const { cols, rows } = useTerminalSize()
 

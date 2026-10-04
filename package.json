@@ -1,6 +1,6 @@
 {
   "name": "whatsapptui",
-  "version": "0.4.0-alpha.1",
+  "version": "1.0.0-beta.1",
   "description": "WhatsAppTUI is an experimental project built on `zapo-js`. It lets you use WhatsApp directly in the terminal.",
   "type": "module",
   "author": "HumanAnomaly",
@@ -29,6 +29,12 @@
     "start": "tsx src/index.tsx",
     "dev": "tsx src/index.tsx",
     "demo": "tsx src/index.tsx --demo",
+    "demo:loading": "tsx src/index.tsx --demo=loading",
+    "demo:qr": "tsx src/index.tsx --demo=qr",
+    "demo:code": "tsx src/index.tsx --demo=code",
+    "demo:code-ready": "tsx src/index.tsx --demo=code-ready",
+    "demo:reconnecting": "tsx src/index.tsx --demo=reconnecting",
+    "demo:boot-error": "tsx src/index.tsx --demo=boot-error",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

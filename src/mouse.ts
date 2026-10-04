@@ -3,11 +3,8 @@ import { useIsTTY } from './hooks.js'
 
 export interface MouseEvt {
   kind: 'click' | 'wheel-up' | 'wheel-down' | 'drag' | 'hover'
-  /** 1-based column, exactly as the terminal reports it. */
   x: number
-  /** 1-based row, exactly as the terminal reports it. */
   y: number
-  /** Row delta since the previous drag event (drag events only). */
   dy?: number
 }
 
@@ -25,12 +22,9 @@ export function useMouse(handler: MouseHandler): void {
   }, [handler])
 }
 
-// ---- hover position store (updated only when the cursor actually moves) ----
-
 let hoverPos: { x: number; y: number } | null = null
 const hoverListeners = new Set<() => void>()
 
-/** Last known cursor position, or null before the first hover. */
 export function useHover(): { x: number; y: number } | null {
   return useSyncExternalStore(
     (listener) => {
@@ -48,8 +42,6 @@ function setHover(x: number, y: number): void {
   hoverPos = { x, y }
   for (const listener of hoverListeners) listener()
 }
-
-// ---------------------------------------------------------------- transport
 
 /** Enter SGR mouse mode: clicks + wheel + button-drag + any-motion (hover). */
 export function enableMouse(): void {
@@ -95,7 +87,6 @@ export function MouseRouter(): null {
           continue
         }
         if (b === 32 && !release) {
-          // Left button held and moving — touch swipe / mouse drag.
           const dy = y - lastDragY
           lastDragY = y
           if (pressPos) dragging = true
@@ -103,7 +94,6 @@ export function MouseRouter(): null {
           continue
         }
         if (b === 35 && !release) {
-          // Any-motion without a pressed button — hover.
           setHover(x, y)
           continue
         }

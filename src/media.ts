@@ -2,13 +2,6 @@ import { readFileSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 import { decode as decodeJpeg } from 'jpeg-js'
 
-// ---------------------------------------------------------------------------
-// Terminal image rendering — dependency-light decoders (PNG via node:zlib,
-// JPEG via jpeg-js, 24-bit BMP by hand) plus a half-block (▀) cell renderer
-// used by media bubbles. Colors are quantized to the nearest 8 so smooth
-// photo gradients merge into few spans.
-// ---------------------------------------------------------------------------
-
 interface DecodedImage {
   width: number
   height: number
@@ -220,10 +213,6 @@ export function renderImageCells(path: string, maxCols: number): ImageCells {
   }
   return { cols, rows, lines }
 }
-
-// ---------------------------------------------------------------------------
-// Voice notes — WAV duration probing and cross-platform playback.
-// ---------------------------------------------------------------------------
 
 const durationCache = new Map<string, number>()
 

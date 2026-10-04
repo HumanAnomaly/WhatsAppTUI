@@ -1,35 +1,22 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { Text, useInput } from 'ink'
-import { currentTheme } from '../theme.js'
-import { useIsTTY } from '../hooks.js'
+import { useIsTTY, useTheme } from '../hooks.js'
 
 interface InputLineProps {
   width: number
   enabled: boolean
   onSubmit: (text: string) => void
   onTypingChange: (typing: boolean) => void
-  /** Phone layout: Backspace on an empty draft goes back to the chat list. */
   onEmptyBackspace?: () => void
-  /** Esc on an empty draft (chat: back on mobile — search: close). */
   onEscape?: () => void
-  /** Live text updates — used by the search bar to filter as you type. */
   onChange?: (text: string) => void
-  /** Draft empty/non-empty flips — lets Main gate arrow-key navigation. */
   onDraftChange?: (hasText: boolean) => void
-  /** Shown when the draft is empty (default: the chat message hint). */
   placeholder?: string
 }
 
-/**
- * Single-line editor in the spirit of opencode / Codex inputs:
- * - code-point indexing (Array.from) so emoji never split under the cursor
- * - a clamped horizontal viewport that follows the cursor in BOTH directions
- * - readline keys: Ctrl+A/E (home/end), Ctrl+W (word delete), Ctrl+U (clear)
- * - fixed width: long drafts scroll instead of wrapping (stable frame height)
- * - typing state is owned here so Main never re-renders on keystrokes
- */
+/** Single-line editor: code-point cursor, clamped viewport, readline keys. */
 export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onTypingChange, onEmptyBackspace, onEscape, onChange, onDraftChange, placeholder }: InputLineProps) {
-  const theme = currentTheme()
+  const theme = useTheme()
   const isTTY = useIsTTY()
   const [chars, setChars] = useState<string[]>([])
   const [cursor, setCursor] = useState(0)
@@ -38,7 +25,6 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
 
   const windowSize = Math.max(8, width - 8)
 
-  // Viewport follows the cursor both ways — the cursor is always on screen.
   useEffect(() => {
     setStart((s) => {
       if (cursor < s) return cursor
@@ -47,7 +33,6 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
     })
   }, [cursor, windowSize])
 
-  // Clear the idle timer on unmount (e.g. switching chats remounts us).
   useEffect(
     () => () => {
       if (idleTimer.current) clearTimeout(idleTimer.current)
@@ -64,8 +49,6 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
     onChange?.('')
   }
 
-  // Report draft emptiness after every render — Main reads it at key-event
-  // time to decide whether ↑/↓ may still switch chats.
   useEffect(() => {
     onDraftChange?.(chars.length > 0)
   })
@@ -144,7 +127,6 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
     { isActive: enabled && isTTY },
   )
 
-  // Render the viewport window with the block cursor inside it.
   const visible = chars.slice(start, start + windowSize)
   const rel = cursor - start
   const before = visible.slice(0, Math.max(0, Math.min(rel, visible.length))).join('')

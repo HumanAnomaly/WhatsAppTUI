@@ -1,27 +1,46 @@
 import { useEffect, useState } from 'react'
-import { Text } from 'ink'
-import { currentTheme } from './theme.js'
-import { useGateway } from './hooks.js'
+import { Box, Text, useInput } from 'ink'
+import { useGateway, useIsTTY, useTheme } from './hooks.js'
 import { MouseRouter } from './mouse.js'
 import { Screen } from './components/Screen.js'
 import { Splash } from './components/Splash.js'
 import { Pairing } from './components/Pairing.js'
 import { Main } from './components/Main.js'
-import { SettingsScreen } from './components/Settings.js'
-import { ChatMenu } from './components/ChatMenu.js'
+import { SettingsPopup } from './components/Settings.js'
+import { ChatMenuPopup } from './components/ChatMenu.js'
 import { HelpPopup } from './components/Help.js'
-import { ProfileScreen } from './components/Profile.js'
+import { ReconnectOverlay } from './components/Reconnecting.js'
+import { DemoSlugHint, demoSlugForKey, jumpDemoSlug } from './components/DemoSwitcher.js'
 import { gateway } from './wa/gateway.js'
 
 const MIN_SPLASH_MS = 1200
 
 function BootError({ error }: { error: string }) {
-  const theme = currentTheme()
+  const theme = useTheme()
+  const { demo } = useGateway()
+  const isTTY = useIsTTY()
+
+  useInput(
+    (input) => {
+      if (!demo) return
+      const slug = demoSlugForKey(input)
+      if (slug) jumpDemoSlug(slug)
+    },
+    { isActive: isTTY && demo },
+  )
+
   return (
     <Screen>
-      <Text color={theme.danger} bold> failed to start</Text>
-      <Text color={theme.text}> {error}</Text>
-      <Text color={theme.dimmer}> check your internet connection and run again: npm start</Text>
+      <Box flexGrow={1} flexDirection="column" justifyContent="center" alignItems="center" paddingX={2}>
+        <Box borderStyle="round" borderColor={theme.danger} paddingX={3} paddingY={1} flexDirection="column" alignItems="center" alignSelf="center">
+          <Text color={theme.danger} bold>✖ failed to start</Text>
+          <Text> </Text>
+          <Text color={theme.text}>{error}</Text>
+          <Text> </Text>
+          <Text color={theme.dimmer}>check your internet connection and run again: npm start</Text>
+        </Box>
+        <DemoSlugHint />
+      </Box>
     </Screen>
   )
 }
@@ -49,17 +68,15 @@ export function App() {
         <BootError error={state.error} />
       ) : state.phase === 'pairing' ? (
         <Pairing />
-      ) : state.screen === 'settings' ? (
-        <SettingsScreen />
-      ) : state.screen === 'chatMenu' ? (
-        <ChatMenu />
-      ) : state.screen === 'profile' ? (
-        <ProfileScreen />
       ) : (
-        // Help is a popup over Main, not a screen swap — Main stays mounted so
-        // selection, drafts and scroll state survive opening/closing it.
+        // Main always stays mounted — settings, chat menu, help and the
+        // reconnect card float above it as popups, so selection, drafts and
+        // scroll position survive opening/closing them.
         <>
           <Main />
+          {state.screen === 'settings' ? <SettingsPopup /> : null}
+          {state.screen === 'chatMenu' ? <ChatMenuPopup /> : null}
+          {state.phase === 'reconnecting' ? <ReconnectOverlay /> : null}
           {state.screen === 'help' ? <HelpPopup /> : null}
         </>
       )}

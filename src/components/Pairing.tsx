@@ -1,10 +1,10 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import QRCode from 'qrcode'
-import { currentTheme } from '../theme.js'
-import { useGateway, useIsTTY, useSpinner } from '../hooks.js'
+import { useGateway, useIsTTY, useSpinner, useTheme } from '../hooks.js'
 import { formatPairingCode } from '../format.js'
 import { Screen } from './Screen.js'
+import { DemoSlugHint, demoSlugForKey, jumpDemoSlug } from './DemoSwitcher.js'
 import { gateway } from '../wa/gateway.js'
 
 const QUIET_ZONE = 3
@@ -48,7 +48,7 @@ function buildLines(value: string): string[][] {
 const QrCode = memo(function QrCode({ value }: { value: string }) {
   const lines = useMemo(() => buildLines(value), [value])
   const [shown, setShown] = useState(0)
-  const theme = currentTheme()
+  const theme = useTheme()
 
   useEffect(() => {
     setShown(0)
@@ -65,7 +65,7 @@ const QrCode = memo(function QrCode({ value }: { value: string }) {
   }
 
   return (
-    <Box flexDirection="column" alignItems="flex-start">
+    <Box flexDirection="column" alignItems="center">
       {lines.slice(0, shown).map((segs, i) => (
         <Text key={`${value}-${i}`}>
           {segs.map((seg, j) => (
@@ -86,7 +86,7 @@ export const Pairing = memo(function Pairing() {
   const state = useGateway()
   const spinner = useSpinner()
   const isTTY = useIsTTY()
-  const theme = currentTheme()
+  const theme = useTheme()
   const [mode, setMode] = useState<'qr' | 'code-ask'>('qr')
   const [phone, setPhone] = useState('')
   const qr = state.qr
@@ -95,6 +95,15 @@ export const Pairing = memo(function Pairing() {
 
   useInput(
     (input, key) => {
+      // Demo playground: 1..7 jumps between auth screens (QR mode only, so
+      // phone-number entry in code-ask mode is never hijacked).
+      if (state.demo && mode === 'qr' && !state.pairingCode) {
+        const slug = demoSlugForKey(input)
+        if (slug) {
+          jumpDemoSlug(slug)
+          return
+        }
+      }
       if (state?.pairingCode) {
         if (key.escape) setMode('qr')
         return
@@ -125,8 +134,8 @@ export const Pairing = memo(function Pairing() {
   )
   return (
     <Screen>
-      <Box flexDirection="column" paddingX={2} paddingTop={1} gap={1}>
-        <Box borderStyle="round" borderColor={theme.accentDeep} paddingX={2} paddingY={1} flexDirection="column" alignItems="center" alignSelf="flex-start">
+      <Box flexGrow={1} flexDirection="column" justifyContent="center" alignItems="center" paddingX={2}>
+        <Box borderStyle="round" borderColor={theme.accentDeep} paddingX={2} paddingY={1} flexDirection="column" alignItems="center" alignSelf="center">
           {state.pairingCode ? (
             <>
               <Text color={theme.accent} bold>Pairing code ready</Text>
@@ -176,7 +185,8 @@ export const Pairing = memo(function Pairing() {
 
         {state.note ? <Text color={theme.warn}>◈ {state.note}</Text> : null}
         {state.error ? <Text color={theme.danger}>✖ {state.error}</Text> : null}
-        <Text color={theme.dimmer}>{spinner} session is stored in .auth/state.sqlite — you only scan once</Text>
+        <Text color={theme.dimmer}>session is stored in .auth/state.sqlite — you only scan once</Text>
+        <DemoSlugHint />
       </Box>
     </Screen>
   )

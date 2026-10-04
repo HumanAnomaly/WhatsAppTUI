@@ -1,9 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
-import { currentTheme } from '../theme.js'
-import { useGateway, useIsTTY, useThreads } from '../hooks.js'
+import { useGateway, useIsTTY, useTerminalSize, useTheme, useThreads } from '../hooks.js'
 import { useMouse, type MouseEvt } from '../mouse.js'
-import { Screen } from './Screen.js'
 import { displayJid } from '../format.js'
 import { gateway, type WaThread } from '../wa/gateway.js'
 
@@ -40,11 +38,12 @@ const ACTIONS: Action[] = [
   },
 ]
 
-export const ChatMenu = memo(function ChatMenu() {
+export const ChatMenuPopup = memo(function ChatMenuPopup() {
   const state = useGateway()
   const threads = useThreads()
-  const theme = currentTheme()
+  const theme = useTheme()
   const isTTY = useIsTTY()
+  const { cols, rows } = useTerminalSize()
   const [sel, setSel] = useState(0)
 
   const thread = state.activeJid ? threads.find((t) => t.jid === state.activeJid) ?? null : null
@@ -61,6 +60,12 @@ export const ChatMenu = memo(function ChatMenu() {
   const itemsRef = useRef(items)
   itemsRef.current = items
 
+  // Top-anchored card geometry (exact, no rounding): backdrop pad + card
+  // border + padding + title + jid + spacer above the rows.
+  const cardH = items.length + 9 + (thread?.infoSummary ? 1 : 0)
+  const cardTop = 2
+  const cardEnd = cardTop + cardH + 1 // + footer line; 0-based exclusive end
+
   const applyItem = (i: number): void => {
     const item = itemsRef.current[i]
     if (!item || !thread) return
@@ -76,9 +81,11 @@ export const ChatMenu = memo(function ChatMenu() {
       return
     }
     if (e.kind !== 'click') return
-    // Rows start at screen row 6: padding, border, padding, title, jid, spacer.
-    const i = row - 6
-    if (i < 0 || i >= itemsRef.current.length) return
+    const i = row - cardTop - 5
+    if (i < 0 || i >= itemsRef.current.length || row < cardTop || row >= cardEnd) {
+      gateway.setScreen('main') // backdrop dismiss
+      return
+    }
     setSel(i)
     applyItem(i)
   }
@@ -111,23 +118,21 @@ export const ChatMenu = memo(function ChatMenu() {
   const title = `Chat options — ${thread.name}`
 
   return (
-    <Screen>
-      <Box flexDirection="column" paddingX={2} paddingTop={1}>
-        <Box borderStyle="round" borderColor={theme.border} paddingX={2} paddingY={1} flexDirection="column" alignSelf="flex-start" minWidth={52}>
-          <Text color={theme.accent} bold wrap="truncate-end">{` ${title}`}</Text>
-          <Text color={theme.dimmer} wrap="truncate-end">{` ${displayJid(thread.jid)}`}</Text>
-          <Text> </Text>
-          {items.map((item, i) => (
-            <Text key={item.id} color={i === sel ? theme.accent : theme.text} bold={i === sel}>
-              {` ${i === sel ? '›' : ' '} ${item.label(thread)}`}
-            </Text>
-          ))}
-          <Text> </Text>
-          {thread.infoSummary ? <Text color={theme.dim} wrap="truncate-end">{` ${thread.infoSummary}`}</Text> : null}
-          <Text color={theme.dimmer}>{' ↑↓ / click choose · Enter apply · Esc back'}</Text>
-        </Box>
-        <Text color={theme.dimmer}>{' '}Changes sync to your other WhatsApp devices via app-state.</Text>
+    <Box position="absolute" width={cols} height={rows} flexDirection="column" alignItems="center" paddingTop={2}>
+      <Box borderStyle="round" borderColor={theme.border} backgroundColor={theme.bg} paddingX={2} paddingY={1} flexDirection="column">
+        <Text color={theme.accent} bold wrap="truncate-end">{` ${title}`}</Text>
+        <Text color={theme.dimmer} wrap="truncate-end">{` ${displayJid(thread.jid)}`}</Text>
+        <Text> </Text>
+        {items.map((item, i) => (
+          <Text key={item.id} color={i === sel ? theme.accent : theme.text} bold={i === sel}>
+            {` ${i === sel ? '›' : ' '} ${item.label(thread)}`}
+          </Text>
+        ))}
+        <Text> </Text>
+        {thread.infoSummary ? <Text color={theme.dim} wrap="truncate-end">{` ${thread.infoSummary}`}</Text> : null}
+        <Text color={theme.dimmer}>{' ↑↓ / click choose · Enter apply · Esc back'}</Text>
       </Box>
-    </Screen>
+      <Text color={theme.dimmer}>{' '}Changes sync to your other WhatsApp devices via app-state.</Text>
+    </Box>
   )
 })

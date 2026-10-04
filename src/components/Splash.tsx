@@ -1,70 +1,75 @@
 import { memo } from 'react'
-import { Box, Text } from 'ink'
-import { currentTheme, SPINNER_FRAMES } from '../theme.js'
-import { useGateway, useSpinner, useTerminalSize, useTicker } from '../hooks.js'
+import { Box, Text, useInput } from 'ink'
+import { useGateway, useIsTTY, useSpinner, useTerminalSize, useTheme } from '../hooks.js'
+import { hyperlink } from '../format.js'
 import { logoLines } from './logo.js'
 import { Screen } from './Screen.js'
+import { DemoSlugHint, demoSlugForKey, jumpDemoSlug } from './DemoSwitcher.js'
 
-const BOOT_CELLS = 26
+const BOOT_CELLS = 22
+const REPO_URL = 'https://github.com/HumanAnomaly/WhatsAppTUI'
 
-/** Isolated so the color pulse re-renders only these lines, never the tree. */
+/** Static wordmark in a single accent color — no animation, stays clean. */
 const Logo = memo(function Logo() {
   const { cols } = useTerminalSize()
-  const tick = useTicker(240)
-  const theme = currentTheme()
-  const palette = [theme.accent, theme.accentDeep, theme.info, theme.accent]
-  const shade = (i: number): string => palette[(tick + i) % palette.length] ?? theme.accent
+  const theme = useTheme()
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" alignItems="center">
       {logoLines(cols).map((rows, line) =>
         rows.map((row, i) => (
-          <Text key={`${line}-${i}`} color={shade(line + i)} bold>{row}</Text>
+          <Text key={`${line}-${i}`} color={theme.accent} bold>{row}</Text>
         )),
       )}
     </Box>
   )
 })
 
-function Steps() {
+function Status() {
   const { bootSteps } = useGateway()
-  const theme = currentTheme()
+  const spinner = useSpinner()
+  const theme = useTheme()
+  const current = bootSteps[bootSteps.length - 1] ?? 'Starting…'
   const filled = Math.min(BOOT_CELLS, Math.round((bootSteps.length / 4) * BOOT_CELLS))
   return (
-    <Box flexDirection="column">
-      <Text color={theme.dim}> preparing…</Text>
-      {bootSteps.map((step, i) => (
-        <Text key={`${step}-${i}`} color={i === bootSteps.length - 1 ? theme.text : theme.dimmer}>
-          {'  '}✓ {step}
-        </Text>
-      ))}
+    <Box flexDirection="column" alignItems="center">
+      <Text>
+        <Text color={theme.accent}>{spinner} </Text>
+        <Text color={theme.text}>{current}…</Text>
+      </Text>
       <Box marginTop={1} flexDirection="row">
-        <Text>{'  '}</Text>
-        <Text color={theme.accent}>{'▰'.repeat(filled)}</Text>
-        <Text color={theme.border}>{'▱'.repeat(BOOT_CELLS - filled)}</Text>
+        <Text color={theme.accent}>{'━'.repeat(filled)}</Text>
+        <Text color={theme.border}>{'─'.repeat(BOOT_CELLS - filled)}</Text>
       </Box>
     </Box>
   )
 }
 
 export const Splash = memo(function Splash() {
-  const spinner = useSpinner()
-  const theme = currentTheme()
+  const theme = useTheme()
   const { demo } = useGateway()
+  const isTTY = useIsTTY()
+
+  useInput(
+    (input) => {
+      if (!demo) return
+      const slug = demoSlugForKey(input)
+      if (slug) jumpDemoSlug(slug)
+    },
+    { isActive: isTTY && demo },
+  )
+
   return (
     <Screen>
-      <Box flexDirection="column" paddingX={2} paddingTop={1} gap={1}>
-      <Logo />
-      <Text color={theme.dim}>
-        {'  '}WhatsAppTUI {' '}· {' '}WhatsApp in your terminal, no browser
-      </Text>
-        <Box marginTop={1} flexDirection="column">
-          <Text>
-            <Text color={theme.accent}>{spinner}</Text>
-            <Text color={theme.dim}> working…</Text>
-          </Text>
-          <Steps />
+      <Box flexGrow={1} flexDirection="column" justifyContent="center" alignItems="center">
+        <Box flexDirection="column" alignItems="center" paddingX={2} gap={1}>
+          <Logo />
+          <Text color={theme.accent}>{hyperlink(REPO_URL)}</Text>
+          <Box marginTop={1}>
+            <Status />
+          </Box>
+          {demo ? <Text color={theme.warn}>◈ demo mode — no WhatsApp connection</Text> : null}
+          <DemoSlugHint />
         </Box>
-        {demo ? <Text color={theme.warn}>  ◈ demo mode — no WhatsApp connection</Text> : null}
       </Box>
     </Screen>
   )

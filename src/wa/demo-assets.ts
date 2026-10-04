@@ -2,9 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 
 /**
- * Dependency-free demo asset generators so `--demo` exercises the REAL
- * download/open/play pipeline (BMP opens in Paint/Photos/Preview, WAV plays
- * in mpv/ffplay/afplay). No sharp/ffmpeg needed.
+ * Dependency-free demo asset generators (BMP + WAV, no sharp/ffmpeg).
  */
 export function writeDemoBmp(filePath: string, w = 320, h = 240): void {
   const rowSize = Math.floor((24 * w + 31) / 32) * 4
@@ -18,7 +16,6 @@ export function writeDemoBmp(filePath: string, w = 320, h = 240): void {
       const dx = x - cx
       const dy = (y - cy) * 1.15
       const sun = dx * dx + dy * dy <= sunR * sunR
-      // Sky gradient (top deep blue → horizon warm), ground strip at bottom.
       let r: number
       let g: number
       let b: number
