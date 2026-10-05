@@ -25,7 +25,7 @@ const MOUSE: Array<[string, string]> = [
   ['Click chat', 'open that conversation'],
   ['Click chat title', 'open the info panel (tap again to close)'],
   ['Click ⚙', 'open settings'],
-  ['Click message', 'copy text · open/play media'],
+  ['Click message', 'copy text · expand long messages'],
   ['Click media', 'open photo/video · play voice · selects o/d/p target'],
   ['Click Archived', 'enter / leave the archived folder'],
   ['Wheel / swipe', 'scroll the chat list or history'],

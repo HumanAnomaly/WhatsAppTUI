@@ -342,9 +342,7 @@ export class GatewayActionsBase extends GatewayProfileBase {
       this.set({ error: errorMessage(err) })
     }
     this.qrAttempt = 0
-    this.clearThreadCache()
-    this.clearMediaCaches()
-    void this.clearStoredMailbox()
+    void this.resetLocalHistory()
     this.set({
       phase: 'pairing',
       session: 'relink',

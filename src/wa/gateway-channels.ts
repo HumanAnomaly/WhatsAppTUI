@@ -1,5 +1,5 @@
 import { GatewayMessagesBase } from './gateway-messages.js'
-import { collectNewsletterMessages, describeMessage } from './decode.js'
+import { collectNewsletterPlaintexts, describeMessage } from './decode.js'
 import type { NewsletterNode } from './decode.js'
 
 /** Channel (newsletter) listing, history and live updates. */
@@ -50,12 +50,22 @@ export class GatewayChannelsBase extends GatewayMessagesBase {
     void client.newsletter.subscribeLiveUpdates(jid).catch(() => undefined)
     try {
       const page = await client.newsletter.fetchMessages({ newsletterJid: jid, count: 30 })
-      const nodes = collectNewsletterMessages(page as unknown as NewsletterNode)
+      const posts = collectNewsletterPlaintexts(page as unknown as NewsletterNode)
       let changed = false
-      for (const n of nodes) {
+      for (const n of posts) {
         const id = n.id ?? `nl-${Date.now()}-${Math.random()}`
         if (t.messages.some((m) => m.id === id)) continue
-        t.messages.push({ id, fromMe: false, text: n.text || '[channel message]', ts: n.ts ?? Date.now(), status: 'read' })
+        const described = describeMessage(n.message)
+        const text = described.text || '[channel message]'
+        if (n.message) this.rememberMedia(jid, id, n.message, null)
+        t.messages.push({
+          id,
+          fromMe: n.fromMe === true,
+          text,
+          ts: n.ts ?? Date.now(),
+          status: 'read',
+          media: described.media ?? null,
+        })
         changed = true
       }
       if (changed) {
@@ -68,19 +78,24 @@ export class GatewayChannelsBase extends GatewayMessagesBase {
   }
 
   protected ingestNewsletterEvent(e: Record<string, unknown>): void {
+    // Genuine posts arrive as regular `message` events (see ingestMessage).
+    // These two carry no bodies: `newsletter` is admin/metadata noise and
+    // `newsletter_message_update` is reactions/votes/counters — except text
+    // edits, which patch the stored post in place.
+    const update = (e as { update?: { kind?: string; message?: unknown } }).update
+    if (!update || update.kind !== 'edit' || !update.message) return
     const key = e.key as Record<string, unknown> | undefined
     const jid = (e.jid ?? e.newsletterJid ?? key?.remoteJid) as string | undefined
     if (!jid || !jid.endsWith('@newsletter')) return
-    const inner = (e.message ?? e) as { message?: unknown }
-    const described = describeMessage(inner.message ?? inner)
-    const text = described.text
-    if (!text) return
-    const t = this.thread(jid)
-    const id = String(e.serverId ?? e.messageId ?? key?.id ?? `nl-live-${Date.now()}`)
-    if (t.messages.some((m) => m.id === id)) return
-    const tsSec = Number(e.timestampSeconds ?? e.timestamp ?? 0)
-    t.messages.push({ id, fromMe: e.fromMe === true, text, ts: tsSec > 0 ? tsSec * 1000 : Date.now(), status: 'read', media: described.media ?? null })
-    t.lastTs = Date.now()
+    const t = this.threads.get(jid)
+    if (!t) return
+    const parent = (e as { parentMessageServerId?: unknown }).parentMessageServerId
+    const pid = parent !== undefined && parent !== null ? String(parent) : ''
+    const msg = t.messages.find((m) => (pid !== '' && m.id === pid) || (m.serverId !== undefined && String(m.serverId) === pid))
+    if (!msg) return
+    const described = describeMessage(update.message)
+    if (described.text) msg.text = described.text
+    if (described.media) msg.media = described.media
     this.bump(t)
   }
 }

@@ -5,7 +5,7 @@ import { createSqliteStore } from '@zapo-js/store-sqlite'
 import { GatewayActionsBase } from './gateway-actions.js'
 import { DATA_DIR, DATA_FILE } from './paths.js'
 import { errorMessage } from './decode.js'
-import { profileIdForJid, readActiveProfile, writeActiveProfile } from './profiles.js'
+import { readActiveProfile, sameOwner, writeActiveProfile } from './profiles.js'
 import { getSettings, subscribeSettings } from '../config.js'
 
 /** Connection lifecycle: store setup, event wiring, reconnect policy. */
@@ -119,9 +119,7 @@ export class GatewayConnectionBase extends GatewayActionsBase {
         // Like WhatsApp Web, logout drops the local history — the next
         // number that pairs starts from a clean slate and re-syncs.
         this.qrAttempt = 0
-        this.clearThreadCache()
-        this.clearMediaCaches()
-        void this.clearStoredMailbox()
+        void this.resetLocalHistory()
         this.set({
           phase: 'pairing',
           session: 'relink',
@@ -263,21 +261,22 @@ export class GatewayConnectionBase extends GatewayActionsBase {
    */
   protected handleAccountSwitch(meJid: string | null | undefined): void {
     if (!meJid) return
-    const profileId = profileIdForJid(meJid)
     const prev = readActiveProfile()
-    if (prev && prev.profileId === profileId) {
+    if (prev && sameOwner(prev.meJid, meJid)) {
       if (prev.meJid !== meJid) writeActiveProfile(meJid)
       return
     }
-    this.clearThreadCache()
-    this.clearMediaCaches()
-    void this.clearStoredMailbox()
-    writeActiveProfile(meJid)
-    if (prev) {
-      this.set({
-        activeJid: null,
-        note: `Switched account — loaded a fresh history for the new number.`,
-      })
+    if (!prev) {
+      // First run with tracking: adopt whatever is already cached. Wiping
+      // here once destroyed a real user's history — never clear blindly.
+      writeActiveProfile(meJid)
+      return
     }
+    void this.resetLocalHistory()
+    writeActiveProfile(meJid)
+    this.set({
+      activeJid: null,
+      note: `Switched account — loaded a fresh history for the new number.`,
+    })
   }
 }

@@ -2,6 +2,7 @@ import { isNewsletterJid, isStatusBroadcastJid } from 'zapo-js'
 import type { WaIncomingMessageEvent, WaIncomingUnavailableMessageEvent } from 'zapo-js'
 import { GatewayMediaBase } from './gateway-media.js'
 import { decodeStoredMessageFull, describeMessage } from './decode.js'
+import { backupStoreFile } from './profiles.js'
 import { getSettings } from '../config.js'
 import type { ThreadData, WaMediaInfo } from './types.js'
 
@@ -13,10 +14,14 @@ export class GatewayMessagesBase extends GatewayMediaBase {
 
   protected ingestMessage(event: WaIncomingMessageEvent): void {
     const jid = event.key.remoteJid
-    if (!jid || isStatusBroadcastJid(jid) || isNewsletterJid(jid)) return
+    if (!jid || isStatusBroadcastJid(jid)) return
+    // Channel posts arrive here too, as decoded proto bodies — the old code
+    // dropped them, leaving channels forever empty.
+    const isChannel = event.key.isNewsletter === true || isNewsletterJid(jid)
 
     const t = this.thread(jid)
     const id = event.key.id
+    const serverId = typeof event.key.serverId === 'number' ? event.key.serverId : undefined
     const ts = (event.timestampSeconds ?? Math.floor(Date.now() / 1000)) * 1000
     const described = describeMessage(event.message, event.expirationSeconds)
     const text = described.text
@@ -25,15 +30,17 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     if (event.pushName) {
       if (event.key.isGroup && event.key.participant && !event.key.fromMe) {
         t.senderNames[event.key.participant] = event.pushName
-      } else if (!event.key.isGroup && !t.contactResolved) {
+      } else if (!event.key.isGroup && !isChannel && !t.contactResolved) {
         // Pushname is a fallback — a saved-contact name (resolved async below)
         // always wins over it, like the phone app.
         t.name = event.pushName
       }
     }
-    if (!event.key.isGroup) void this.resolveNameFromContacts(jid)
+    if (!event.key.isGroup && !isChannel) void this.resolveNameFromContacts(jid)
 
-    const existing = t.messages.find((m) => m.id === id && m.fromMe === event.key.fromMe)
+    const existing = t.messages.find(
+      (m) => (m.id === id && m.fromMe === event.key.fromMe) || (serverId !== undefined && m.serverId === serverId),
+    )
     if (existing) {
       if (text) existing.text = text
       if (described.media) existing.media = described.media
@@ -48,6 +55,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
 
     t.messages.push({
       id,
+      ...(serverId !== undefined ? { serverId } : {}),
       fromMe: event.key.fromMe,
       senderJid: event.key.participant,
       senderName,
@@ -60,7 +68,8 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     t.lastTs = Math.max(t.lastTs, ts)
 
     if (!event.key.fromMe) {
-      if (this.activeJid === jid) {
+      // Channels use view receipts, not chat read receipts.
+      if (this.activeJid === jid && !isChannel) {
         void this.markRead(event)
       } else {
         t.unread += 1
@@ -134,7 +143,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
   /** Read receipts for messages that arrived while another chat was open. */
   protected async markThreadRead(jid: string): Promise<void> {
     const client = this.client
-    if (!client || !getSettings().readReceipts) return
+    if (!client || !getSettings().readReceipts || isNewsletterJid(jid)) return
     const t = this.threads.get(jid)
     if (!t) return
     const pending = t.messages
@@ -308,6 +317,17 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     this.receiptSent.clear()
     this.contactLookups.clear()
     this.oldestBeforeRequest.clear()
+  }
+
+  /**
+   * Drop this account's local history (memory + store), with a timestamped
+   * backup first. A false account-switch must never mean lost chats again.
+   */
+  protected async resetLocalHistory(): Promise<void> {
+    this.clearThreadCache()
+    this.clearMediaCaches()
+    backupStoreFile()
+    await this.clearStoredMailbox()
   }
 
   /**

@@ -174,33 +174,70 @@ export interface NewsletterNode {
   content?: unknown
 }
 
-export function extractNodeText(node: NewsletterNode): string {
-  if (typeof node.content === 'string') return node.content
-  if (Array.isArray(node.content)) {
-    for (const child of node.content) {
-      if (typeof child === 'string') return child
-      if (child && typeof child === 'object') {
-        const found = extractNodeText(child as NewsletterNode)
-        if (found) return found
+export interface NewsletterFetchedMessage {
+  id?: string
+  ts?: number
+  fromMe?: boolean
+  message: proto.Message
+}
+
+function plaintextBytes(raw: unknown): Uint8Array | null {
+  if (!raw) return null
+  if (raw instanceof Uint8Array) return raw.length > 0 ? raw : null
+  if (typeof raw === 'string') {
+    const s = raw.trim()
+    if (!s) return null
+    try {
+      const buf = Buffer.from(s, 'base64')
+      return buf.length > 0 ? buf : null
+    } catch {
+      return null
+    }
+  }
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const found = plaintextBytes(item)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+/**
+ * Real channel bodies live in `<message>/<plaintext>` base64 blobs — never as
+ * XML text. Reaction/vote/counter aggregates have no plaintext child and are
+ * skipped (treating them as posts is what produced timestamp-only rows).
+ */
+export function collectNewsletterPlaintexts(node: NewsletterNode, out: NewsletterFetchedMessage[] = []): NewsletterFetchedMessage[] {
+  if (!node || typeof node !== 'object' || node instanceof Uint8Array) return out
+  if (node.tag === 'message') {
+    const content = Array.isArray(node.content) ? node.content : []
+    const pt = content.find(
+      (c): c is NewsletterNode => !!c && typeof c === 'object' && !(c instanceof Uint8Array) && (c as NewsletterNode).tag === 'plaintext',
+    )
+    const bytes = plaintextBytes(pt?.content)
+    if (bytes) {
+      try {
+        const message = proto.Message.decode(bytes) as unknown as proto.Message
+        const attrs = node.attrs ?? {}
+        const tsSec = Number(attrs['t'] ?? 0)
+        const rawId = attrs['id'] ?? attrs['server_id']
+        out.push({
+          id: rawId !== undefined ? String(rawId) : undefined,
+          ts: tsSec > 0 ? tsSec * 1000 : undefined,
+          fromMe: attrs['is_sender'] === true || attrs['is_sender'] === 'true' || undefined,
+          message,
+        })
+      } catch {
+        // undecodable post — skip, never fabricate text
       }
     }
   }
-  return ''
-}
-
-export function collectNewsletterMessages(node: NewsletterNode, out: Array<{ id?: string; ts?: number; text: string }> = []): Array<{ id?: string; ts?: number; text: string }> {
-  if (!node || typeof node !== 'object') return out
-  if (node.tag === 'message') {
-    const tsSec = Number(node.attrs?.t ?? 0)
-    out.push({
-      id: node.attrs?.id ? String(node.attrs.id) : undefined,
-      ts: tsSec > 0 ? tsSec * 1000 : undefined,
-      text: extractNodeText(node),
-    })
-  }
   if (Array.isArray(node.content)) {
     for (const child of node.content) {
-      if (child && typeof child === 'object') collectNewsletterMessages(child as NewsletterNode, out)
+      if (child && typeof child === 'object' && !(child instanceof Uint8Array)) {
+        collectNewsletterPlaintexts(child as NewsletterNode, out)
+      }
     }
   }
   return out

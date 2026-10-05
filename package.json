@@ -35,6 +35,7 @@
     "demo:code-ready": "tsx src/index.tsx --demo=code-ready",
     "demo:reconnecting": "tsx src/index.tsx --demo=reconnecting",
     "demo:boot-error": "tsx src/index.tsx --demo=boot-error",
+    "recover:threads": "tsx scripts/recover-threads.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

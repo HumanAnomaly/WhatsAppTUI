@@ -34,6 +34,8 @@ export interface WaPlaybackState {
 
 export interface WaMsg {
   id: string
+  /** Server-assigned id for channel posts (edits reference this, not `id`). */
+  serverId?: number
   fromMe: boolean
   senderJid?: string
   senderName?: string

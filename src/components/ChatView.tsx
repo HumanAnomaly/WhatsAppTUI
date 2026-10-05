@@ -1,10 +1,10 @@
-import { memo, useEffect, useRef } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Text } from 'ink'
-import { chatKindIcon, displayJid, formatFullTime, visualWidth } from '../format.js'
+import { COLLAPSE_AT, chatKindIcon, collapseText, displayJid, formatFullTime, visualWidth } from '../format.js'
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
 import { usePlayback, useTheme, useTicker } from '../hooks.js'
 import { gateway, formatMediaDuration, type WaMsg, type WaThread } from '../wa/gateway.js'
-import { imageCellSize, imageInfo, renderImageCells, type ImageCells } from '../media.js'
+import { renderImageCells, type ImageCells } from '../media.js'
 
 const SENDER_COLORS = ['#7FDBCA', '#E9C46A', '#9BB8FF', '#FFB4A2', '#B5E48C', '#D8A7FF', '#8ECAE6']
 
@@ -62,6 +62,7 @@ function buildBlocks(msgs: WaMsg[]): Array<MsgBlock | WaMsg> {
 
 interface BubbleProps {
   msg: WaMsg
+  text: string
   status: WaMsg['status']
   hovered: boolean
   width: number
@@ -69,17 +70,28 @@ interface BubbleProps {
 
 const imgColsFor = (maxWidth: number): number => Math.max(12, Math.min(44, maxWidth - 6))
 
+// Inline preview treatment: a small framed thumbnail (never full-bleed), so
+// bright photos can't swallow the surrounding chat. Both the bubble and the
+// row counter below must use this — never call imageCellsFor directly.
+const PREVIEW_MAX_COLS = 30
+const PREVIEW_MAX_ROWS = 8
+const PREVIEW_PAD = 1
+
 const cellsCache = new Map<string, ImageCells | null>()
-function imageCellsFor(path: string, maxCols: number): ImageCells | null {
-  const key = `${path}|${maxCols}`
+function imageCellsFor(path: string, maxCols: number, maxRows = 24): ImageCells | null {
+  const key = `${path}|${maxCols}|${maxRows}`
   if (!cellsCache.has(key)) {
     try {
-      cellsCache.set(key, renderImageCells(path, maxCols))
+      cellsCache.set(key, renderImageCells(path, maxCols, maxRows))
     } catch {
       cellsCache.set(key, null)
     }
   }
   return cellsCache.get(key) ?? null
+}
+
+function previewCells(localPath: string, maxWidth: number): ImageCells | null {
+  return imageCellsFor(localPath, Math.min(imgColsFor(maxWidth), PREVIEW_MAX_COLS), PREVIEW_MAX_ROWS)
 }
 
 const ImageCellsView = memo(function ImageCellsView({ cells }: { cells: ImageCells }) {
@@ -104,10 +116,11 @@ function mediaMsgRows(m: WaMsg, maxWidth: number, rowsFor: (text: string) => num
   if (media.kind === 'voice' || media.kind === 'audio') {
     return rowsFor(voiceRowText(m, maxWidth, true, media.durationSec ?? 0)) + 1
   }
-  const info = media.localPath ? imageInfo(media.localPath) : null
-  if (media.kind !== 'image' || !info) return rowsFor(m.text) + 1
+  if (media.kind !== 'image' || !media.localPath) return rowsFor(m.text) + 1
+  const cells = previewCells(media.localPath, maxWidth)
+  if (!cells) return rowsFor(m.text) + 1
   const capRows = media.caption ? rowsFor(media.caption) : 0
-  return imageCellSize(info.width, info.height, imgColsFor(maxWidth)).rows + capRows + 1
+  return cells.rows + capRows + 1 + PREVIEW_PAD * 2
 }
 
 /**
@@ -154,7 +167,7 @@ const VoiceRow = memo(function VoiceRow({ msg, hovered, width }: { msg: WaMsg; h
   )
 })
 
-const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps) {
+const Bubble = memo(function Bubble({ msg, text, status, hovered, width }: BubbleProps) {
   const theme = useTheme()
   void status // memo contract: re-render when delivery status changes
   const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
@@ -190,14 +203,16 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
 
   const imgCells =
     msg.media?.kind === 'image' && msg.media.localPath
-      ? imageCellsFor(msg.media.localPath, imgColsFor(maxWidth))
+      ? previewCells(msg.media.localPath, maxWidth)
       : null
   if (imgCells) {
     const bg = msg.fromMe ? outBg : inBg
     return (
       <Box paddingX={1} flexDirection="row" justifyContent={msg.fromMe ? 'flex-end' : 'flex-start'}>
         <Box flexDirection="column" alignItems={msg.fromMe ? 'flex-end' : 'flex-start'}>
-          <ImageCellsView cells={imgCells} />
+          <Box backgroundColor={bg} paddingX={PREVIEW_PAD} paddingY={PREVIEW_PAD}>
+            <ImageCellsView cells={imgCells} />
+          </Box>
           {msg.media!.caption ? (
             <Text backgroundColor={bg} color={theme.text} wrap="wrap">{` ${msg.media!.caption} `}</Text>
           ) : null}
@@ -210,7 +225,7 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
     return (
       <Box justifyContent="flex-end" paddingX={1}>
         <Box flexDirection="column" width={maxWidth} alignItems="flex-end">
-          <Text backgroundColor={outBg} color={theme.text} wrap="wrap">{` ${msg.text} `}</Text>
+          <Text backgroundColor={outBg} color={theme.text} wrap="wrap">{` ${text} `}</Text>
           {metaLine(outBg)}
         </Box>
       </Box>
@@ -219,7 +234,7 @@ const Bubble = memo(function Bubble({ msg, status, hovered, width }: BubbleProps
   return (
     <Box flexDirection="column" paddingX={1} alignItems="flex-start">
       <Box flexDirection="column" width={maxWidth} alignItems="flex-start">
-        <Text backgroundColor={inBg} color={theme.text} wrap="wrap">{` ${msg.text} `}</Text>
+        <Text backgroundColor={inBg} color={theme.text} wrap="wrap">{` ${text} `}</Text>
         {metaLine(inBg)}
       </Box>
     </Box>
@@ -253,6 +268,16 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
   const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
   const rowsFor = (text: string): number =>
     Math.max(1, Math.ceil(visualWidth(` ${text} `) / Math.max(10, maxWidth - 2)))
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const expandedRef = useRef(expanded)
+  expandedRef.current = expanded
+  useEffect(() => {
+    setExpanded(new Set())
+  }, [thread?.jid])
+
+  const isCollapsible = (m: WaMsg): boolean => !m.media && !m.system && rowsFor(m.text) > COLLAPSE_AT
+  const displayText = (m: WaMsg): string =>
+    !m.media && !m.system && !expanded.has(m.id) ? collapseText(m.text, rowsFor) : m.text
 
   const blocks: Array<MsgBlock | WaMsg> = []
   const lineMap: LineSpan[] = []
@@ -272,7 +297,8 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
       const first = b.msgs[0]!
       if (thread.jid.endsWith('@g.us') && first.senderName) row += 1
       for (const m of b.msgs) {
-        const tl = m.media ? mediaMsgRows(m, maxWidth, rowsFor) : rowsFor(m.text)
+        const shown = displayText(m)
+        const tl = m.media ? mediaMsgRows(m, maxWidth, rowsFor) : rowsFor(shown)
         lineMap.push({ start: row, end: row + tl - 1, id: m.id, text: m.text })
         row += tl + 1
       }
@@ -325,7 +351,7 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
       for (const m of b.msgs) {
         items.push({
           key: m.id,
-          node: <Bubble msg={m} status={m.status} hovered={hoveredId === m.id} width={width} />,
+          node: <Bubble msg={m} text={displayText(m)} status={m.status} hovered={hoveredId === m.id} width={width} />,
         })
       }
       prevKey = b.key
@@ -341,11 +367,11 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
         ? 'loading older messages…'
         : ''
 
-  const stateRef = useRef({ lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread })
-  stateRef.current = { lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread }
+  const stateRef = useRef({ lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread, expanded, setExpanded, isCollapsible })
+  stateRef.current = { lineMap, top, onCopy, onMediaOpen, onMediaPlay, thread, expanded, setExpanded, isCollapsible }
   const onMouse = (e: MouseEvt): void => {
     if (e.kind !== 'click') return
-    if (gateway.getSnapshot().screen !== 'main') return // a popup owns the pointer
+    if (gateway.getSnapshot().screen !== 'main') return
     const row = e.y - 1 - stateRef.current.top
     const hit = stateRef.current.lineMap.find((l) => row >= l.start && row <= l.end)
     if (!hit) return
@@ -354,6 +380,14 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
       if (msg.media.kind === 'voice' || msg.media.kind === 'audio') stateRef.current.onMediaPlay?.(hit.id)
       else stateRef.current.onMediaOpen?.(hit.id)
       return
+    }
+    if (msg && stateRef.current.isCollapsible(msg)) {
+      const open = stateRef.current.expanded
+      if (!open.has(msg.id)) {
+        stateRef.current.setExpanded(new Set(open).add(msg.id))
+        return
+      }
+      stateRef.current.setExpanded(new Set([...open].filter((id) => id !== msg.id)))
     }
     stateRef.current.onCopy?.(hit.text)
   }

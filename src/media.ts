@@ -158,9 +158,9 @@ export interface ImageCells {
 }
 
 /** Cell size that preserves the source aspect (each cell holds 2 pixels vertically). */
-export function imageCellSize(imgW: number, imgH: number, maxCols: number): { cols: number; rows: number } {
+export function imageCellSize(imgW: number, imgH: number, maxCols: number, maxRows = 24): { cols: number; rows: number } {
   const cols = Math.max(10, Math.min(44, maxCols))
-  const rows = Math.max(3, Math.min(24, Math.round((cols * imgH) / imgW / 2)))
+  const rows = Math.max(3, Math.min(maxRows, Math.round((cols * imgH) / imgW / 2)))
   return { cols, rows }
 }
 
@@ -191,10 +191,10 @@ function hex([r, g, b]: [number, number, number]): string {
 }
 
 /** Render an image file into colored half-block cell runs (throws when unavailable). */
-export function renderImageCells(path: string, maxCols: number): ImageCells {
+export function renderImageCells(path: string, maxCols: number, maxRows = 24): ImageCells {
   const img = decodeCached(path)
   if (!img) throw new Error('image unavailable')
-  const { cols, rows } = imageCellSize(img.width, img.height, maxCols)
+  const { cols, rows } = imageCellSize(img.width, img.height, maxCols, maxRows)
   const lines: ImageCells['lines'] = []
   for (let cy = 0; cy < rows; cy++) {
     const runs: ImageCells['lines'][number] = []

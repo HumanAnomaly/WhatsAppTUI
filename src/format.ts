@@ -100,6 +100,23 @@ export function chatKindLabel(jid: string): string {
   return 'Contact'
 }
 
+export const COLLAPSE_AT = 8
+export const COLLAPSE_KEEP = 6
+export const EXPAND_SUFFIX = '… [show more]'
+
+/** Cut text to KEEP visual rows (caller passes the same rowsFor as layout). */
+export function collapseText(text: string, rowsFor: (t: string) => number): string {
+  if (rowsFor(text) <= COLLAPSE_AT) return text
+  let lo = 0
+  let hi = text.length
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2)
+    if (rowsFor(`${text.slice(0, mid).trimEnd()}${EXPAND_SUFFIX}`) <= COLLAPSE_KEEP) lo = mid
+    else hi = mid - 1
+  }
+  return `${text.slice(0, Math.max(1, lo)).trimEnd()}${EXPAND_SUFFIX}`
+}
+
 /** Rough terminal-cell width of a string (wide chars — emoji/CJK — count 2). */
 export function visualWidth(text: string): number {
   let width = 0

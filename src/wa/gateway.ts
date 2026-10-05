@@ -20,18 +20,17 @@ export type {
   WaThread,
 } from './types.js'
 export {
-  collectNewsletterMessages,
+  collectNewsletterPlaintexts,
   decodeStoredMessage,
   decodeStoredMessageFull,
   describeMessage,
   errorMessage,
-  extractNodeText,
   formatMediaDuration,
   inferDemoMedia,
   renderMessageText,
   withCaption,
 } from './decode.js'
-export type { NewsletterNode } from './decode.js'
+export type { NewsletterFetchedMessage, NewsletterNode } from './decode.js'
 export { expandHome } from './paths.js'
 export { openExternalFile, playAudioFile } from './media-os.js'
 export type { AuthDemoSlug } from './gateway-demo.js'
