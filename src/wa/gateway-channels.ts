@@ -4,6 +4,8 @@ import type { NewsletterNode } from './decode.js'
 
 /** Channel (newsletter) listing, history and live updates. */
 export class GatewayChannelsBase extends GatewayMessagesBase {
+  /** Channels with live updates on — re-subscribed after every reconnect. */
+  private openChannels = new Set<string>()
   async loadChannels(): Promise<void> {
     const client = this.client
     if (this.state.demo || !client) return
@@ -47,6 +49,11 @@ export class GatewayChannelsBase extends GatewayMessagesBase {
       return
     }
     if (!client) return
+    this.openChannels.add(jid)
+    if (this.openChannels.size > 200) {
+      const oldest = this.openChannels.keys().next()
+      if (!oldest.done) this.openChannels.delete(oldest.value)
+    }
     void client.newsletter.subscribeLiveUpdates(jid).catch(() => undefined)
     try {
       const page = await client.newsletter.fetchMessages({ newsletterJid: jid, count: 30 })
@@ -74,6 +81,15 @@ export class GatewayChannelsBase extends GatewayMessagesBase {
         this.bump(t)
       }
     } catch {
+    }
+  }
+
+  /** Re-subscribe live updates after a reconnect — the server drops them. */
+  protected resubscribeChannels(): void {
+    const client = this.client
+    if (!client || this.openChannels.size === 0) return
+    for (const jid of this.openChannels) {
+      void client.newsletter.subscribeLiveUpdates(jid).catch(() => undefined)
     }
   }
 

@@ -16,6 +16,7 @@ export type {
   WaMsg,
   WaPhase,
   WaPlaybackState,
+  WaReplyRef,
   WaSession,
   WaThread,
 } from './types.js'

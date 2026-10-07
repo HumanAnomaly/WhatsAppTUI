@@ -8,6 +8,18 @@ import { errorMessage } from './decode.js'
 import { readActiveProfile, sameOwner, writeActiveProfile } from './profiles.js'
 import { getSettings, subscribeSettings } from '../config.js'
 
+/**
+ * Server kicks that retry can never heal — reconnecting only burns attempts
+ * (and risks a ban flag). Surface + stop instead.
+ */
+const FATAL_DISCONNECT_REASONS = new Set([
+  'stream_error_device_removed',
+  'stream_error_force_logout',
+  'failure_locked',
+  'failure_banned',
+  'failure_not_authorized',
+])
+
 /** Connection lifecycle: store setup, event wiring, reconnect policy. */
 export class GatewayConnectionBase extends GatewayActionsBase {
   protected reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -133,6 +145,17 @@ export class GatewayConnectionBase extends GatewayActionsBase {
         void client.connect().catch((err) => this.set({ error: errorMessage(err) }))
         return
       }
+      // Fatal server-side kicks (banned / locked / removed elsewhere) will
+      // never succeed on retry — stop instead of burning reconnect attempts.
+      if (!event.isLogout && FATAL_DISCONNECT_REASONS.has(event.reason)) {
+        this.set({
+          phase: 'pairing',
+          session: 'relink',
+          reconnection: null,
+          error: `Disconnected by server (${event.reason}) — fix it on the phone, then restart WhatsAppTUI to re-pair.`,
+        })
+        return
+      }
       this.scheduleReconnect(event.reason)
     })
 
@@ -163,11 +186,13 @@ export class GatewayConnectionBase extends GatewayActionsBase {
       if (!chatJid) return
       const t = this.threads.get(chatJid)
       if (!t) return
-      const nextStatus = event.status === 'read' ? 'read' : 'sent'
+      // sent → delivered → read only — never downgrade (stale receipts arrive late).
+      const rank = { pending: 0, sent: 1, delivered: 2, read: 3, failed: -1 } as const
+      const nextStatus = event.status === 'read' ? 'read' : 'delivered'
       let touched = false
       for (const id of event.messageIds) {
         const msg = t.messages.find((m) => m.id === id && m.fromMe)
-        if (msg && msg.status !== nextStatus) {
+        if (msg && rank[msg.status] < rank[nextStatus]) {
           msg.status = nextStatus
           touched = true
         }
@@ -203,13 +228,30 @@ export class GatewayConnectionBase extends GatewayActionsBase {
 
     client.on('newsletter', (event) => this.ingestNewsletterEvent(event as unknown as Record<string, unknown>))
     client.on('newsletter_message_update', (event) => this.ingestNewsletterEvent(event as unknown as Record<string, unknown>))
+
+    // Fatal stream errors close the connection right after — surface the
+    // cause so the status bar explains *why* instead of just "reconnecting".
+    client.on('stream_failure', (event) => {
+      const detail = (event as unknown as { code?: unknown; message?: unknown }).code
+        ?? (event as unknown as { message?: unknown }).message
+      if (detail !== undefined) this.set({ note: `Stream error: ${String(detail)}` })
+    })
+    // Per-stanza server errors (throttle, bad request) — diagnostics only,
+    // the pending operation already rejected with the real error.
+    client.on('stanza_error', (event) => {
+      const detail = (event as unknown as { code?: unknown; message?: unknown }).code
+        ?? (event as unknown as { message?: unknown }).message
+      if (detail !== undefined) this.set({ note: `Server error: ${String(detail)}` })
+    })
   }
 
   protected async afterOpen(): Promise<void> {
     const client = this.client
     if (!client || this.disposed) return
+    this.set({ syncing: true })
     void client.presence.send('available').catch(() => undefined)
     void this.loadChannels()
+    this.resubscribeChannels()
     try {
       const groups = await client.group.queryAllGroups()
       for (const g of groups) {
@@ -225,6 +267,7 @@ export class GatewayConnectionBase extends GatewayActionsBase {
       }
     } catch {
     }
+    this.set({ syncing: false })
     if (this.activeJid) void this.activateChat(this.activeJid, true)
   }
 

@@ -6,7 +6,7 @@ import { useGateway, useIsTTY, useSettings, useTerminalSize, useTheme, useThread
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
 import { Screen } from './Screen.js'
 import { copyToClipboard } from '../clipboard.js'
-import { gateway, type WaThread } from '../wa/gateway.js'
+import { gateway, type WaReplyRef, type WaThread } from '../wa/gateway.js'
 import { ChatList, CHIP_ZONES, type ChatFilter } from './ChatList.js'
 import { ChatHeader, MessageList } from './ChatView.js'
 import { InfoPanel } from './InfoPanel.js'
@@ -55,6 +55,11 @@ const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobil
         <Text color={theme.accent} bold>WhatsAppTUI</Text>
         <Text color={theme.dimmer}> │ </Text>
         {status}
+        {state.download ? <Text color={theme.warn}> ↓ {state.download.label}</Text> : null}
+        {state.syncing ? <Text color={theme.dimmer}> · syncing…</Text> : null}
+        {state.historyProgress !== null ? (
+          <Text color={theme.dimmer}> · {Math.round(state.historyProgress)}%</Text>
+        ) : null}
         <Text color={theme.dimmer}> · {formatClock(new Date())}</Text>
         <Text color={theme.dimmer}>{' ⚙'}</Text>
       </Text>
@@ -66,6 +71,8 @@ const StatusBar = memo(function StatusBar({ mobile, hoverMenu = false }: { mobil
         <Text color={theme.accent} bold>WhatsAppTUI</Text>
         <Text color={theme.dimmer}> │ </Text>
         {status}
+        {state.download ? <Text color={theme.warn}> ↓ {state.download.label}</Text> : null}
+        {state.syncing ? <Text color={theme.dimmer}> · syncing…</Text> : null}
         {state.historyProgress !== null ? (
           <Text color={theme.dimmer}> · syncing history {Math.round(state.historyProgress)}%</Text>
         ) : null}
@@ -97,6 +104,10 @@ export const Main = memo(function Main() {
   const [scroll, setScroll] = useState(0)
   const [listStart, setListStart] = useState(0)
   const [showInfo, setShowInfo] = useState(false)
+  // Pending reply target — cleared on chat switch and after send.
+  const [reply, setReply] = useState<WaReplyRef | null>(null)
+  const replyRef = useRef<WaReplyRef | null>(null)
+  replyRef.current = reply
   const prefs = useSettings()
   const sidebarBg = panelBg(prefs.sidebarBg)
   const chatBg = panelBg(prefs.chatBg)
@@ -231,8 +242,18 @@ export const Main = memo(function Main() {
   }, [selIdx, listMaxItems])
 
   useEffect(() => {
-    setScroll(0) // fresh chat, fresh top — never carry another chat's offset
+    const jump = jumpToMatchRef.current
+    jumpToMatchRef.current = null
+    if (jump !== null && activeJid) {
+      // A search submit asked to land on a match, not on the latest message.
+      const t = threadsRef.current.find((x) => x.jid === activeJid)
+      setScroll(t ? Math.max(0, t.messages.length - 1 - jump) : 0)
+    } else {
+      setScroll(0) // fresh chat, fresh top — never carry another chat's offset
+    }
     hasDraftRef.current = false // fresh chat, fresh (empty) input
+    setReply(null)
+    replyRef.current = null
     if (activeJid) void gateway.activateChat(activeJid)
   }, [activeJid])
 
@@ -244,6 +265,7 @@ export const Main = memo(function Main() {
   const onSubmit = useCallback((text: string) => {
     const jid = activeJidRef.current
     if (!jid) return
+    const reply = replyRef.current
     // Attachment commands: /img /vid /gif /ptv /aud /vn /doc /stk <path> [| caption] [--once]
     const media = /^\/(img|vid|gif|ptv|aud|vn|doc|stk)\s+(.+)$/i.exec(text)
     if (media) {
@@ -261,11 +283,19 @@ export const Main = memo(function Main() {
       }
       if (path) {
         if (viewOnce) showToast('👁️ view-once: receiver opens once — TUI saves a copy')
-        void gateway.sendMedia(jid, kind, path, caption, viewOnce ? { viewOnce: true } : undefined)
+        void gateway.sendMedia(
+          jid,
+          kind,
+          path,
+          caption,
+          viewOnce ? { viewOnce: true, ...(reply ? { reply } : {}) } : reply ? { reply } : undefined,
+        )
+        setReply(null)
       }
       return
     }
-    void gateway.send(jid, text)
+    void gateway.send(jid, text, reply ?? undefined)
+    setReply(null)
     setScroll(0)
   }, [showToast])
 
@@ -288,6 +318,44 @@ export const Main = memo(function Main() {
     setSearchOpen(false)
     setQuery('')
   }, [])
+  // Submit a search: count matches, jump the open chat to its first match
+  // (or open the first matching chat) — the query stays until Esc.
+  const jumpToMatchRef = useRef<number | null>(null)
+  const submitSearch = useCallback(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) {
+      closeSearch()
+      return
+    }
+    let chats = 0
+    let hits = 0
+    let firstJid: string | null = null
+    let firstIdx = -1
+    let activeIdx = -1
+    for (const t of searchedRef.current) {
+      const idx = t.messages.findIndex((m) => m.text.toLowerCase().includes(needle))
+      if (idx < 0) continue
+      chats += 1
+      for (const m of t.messages) if (m.text.toLowerCase().includes(needle)) hits += 1
+      if (firstJid === null) {
+        firstJid = t.jid
+        firstIdx = idx
+      }
+      if (t.jid === activeJidRef.current) activeIdx = idx
+    }
+    if (chats === 0) {
+      showToast('no matches')
+      return
+    }
+    showToast(`${hits} match${hits === 1 ? '' : 'es'} in ${chats} chat${chats === 1 ? '' : 's'}`)
+    if (activeIdx >= 0) {
+      const t = threadsRef.current.find((x) => x.jid === activeJidRef.current)
+      if (t) setScroll(Math.max(0, t.messages.length - 1 - activeIdx))
+    } else if (firstJid !== null) {
+      jumpToMatchRef.current = firstIdx
+      setSelJid(firstJid)
+    }
+  }, [query, closeSearch, showToast])
   const onSearchChange = useCallback((text: string) => {
     setQuery(text)
     setListStart(0)
@@ -295,6 +363,10 @@ export const Main = memo(function Main() {
   const onDraftChange = useCallback((hasText: boolean) => {
     hasDraftRef.current = hasText
   }, [])
+  const clearReply = useCallback(() => setReply(null), [])
+  const replyLabel = reply
+    ? `${reply.senderName}: ${reply.text.replace(/\s+/g, ' ').slice(0, 60)}`
+    : null
 
   const geo = useRef({
     mobile,
@@ -530,7 +602,8 @@ export const Main = memo(function Main() {
         return
       }
       // Empty-input shortcuts (never steal typing):
-      // i = info panel, o = open in OS viewer, d = download to .media, p = play voice/audio.
+      // i = info panel, r = reply to hovered/clicked (else last) message,
+      // o = open in OS viewer, d = download to .media, p = play voice/audio.
       // Media target = hovered media → clicked media → most recent media.
       if (!key.ctrl && !key.meta && !searchOpen && !hasDraftRef.current) {
         const k = input.toLowerCase()
@@ -541,6 +614,17 @@ export const Main = memo(function Main() {
             return
           }
           setShowInfo((v) => !v)
+          return
+        }
+        if (k === 'r') {
+          const jid = activeJidRef.current
+          if (!jid) return
+          const target = gateway.resolveReplyTarget(jid)
+          if (!target) {
+            showToast('no message to reply to yet')
+            return
+          }
+          setReply(target)
           return
         }
         if (k === 'o' || k === 'd' || k === 'p') {
@@ -581,7 +665,7 @@ export const Main = memo(function Main() {
       width={mobile ? cols : listWidth}
       enabled={state.screen === 'main'}
       placeholder="search chats or messages"
-      onSubmit={closeSearch}
+      onSubmit={submitSearch}
       onEscape={closeSearch}
       onChange={onSearchChange}
       onTypingChange={noop}
@@ -624,6 +708,8 @@ export const Main = memo(function Main() {
             onEmptyBackspace={goBack}
             onEscape={goBack}
             onDraftChange={onDraftChange}
+            replyLabel={replyLabel}
+            onReplyClear={clearReply}
           />
           <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
             {toast ? ` ${toast}` : ' Ctrl+K help · i info · p play voice · click: copy / open / play'}
@@ -659,6 +745,8 @@ export const Main = memo(function Main() {
               onSubmit={onSubmit}
               onTypingChange={onTypingChange}
               onDraftChange={onDraftChange}
+              replyLabel={replyLabel}
+              onReplyClear={clearReply}
             />
             <Text color={toast ? theme.warn : hoverHint ? theme.accent : theme.dimmer} wrap="truncate-end">
               {toast ? ` ${toast}` : ' Ctrl+K help · Ctrl+F search · i info · p play voice · click: copy / open / play'}

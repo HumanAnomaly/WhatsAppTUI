@@ -12,10 +12,13 @@ interface InputLineProps {
   onChange?: (text: string) => void
   onDraftChange?: (hasText: boolean) => void
   placeholder?: string
+  /** Active reply target — rendered as a quote bar above the input. */
+  replyLabel?: string | null
+  onReplyClear?: () => void
 }
 
 /** Single-line editor: code-point cursor, clamped viewport, readline keys. */
-export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onTypingChange, onEmptyBackspace, onEscape, onChange, onDraftChange, placeholder }: InputLineProps) {
+export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onTypingChange, onEmptyBackspace, onEscape, onChange, onDraftChange, placeholder, replyLabel, onReplyClear }: InputLineProps) {
   const theme = useTheme()
   const isTTY = useIsTTY()
   const [chars, setChars] = useState<string[]>([])
@@ -62,7 +65,8 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
         return
       }
       if (key.escape) {
-        if (chars.length > 0) reset()
+        if (replyLabel) onReplyClear?.()
+        else if (chars.length > 0) reset()
         else onEscape?.()
         return
       }
@@ -134,7 +138,11 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
   const after = rel >= 0 && rel + 1 <= visible.length ? visible.slice(rel + 1).join('') : ''
 
   return (
-    <Text>
+    <>
+      {replyLabel ? (
+        <Text color={theme.warn} wrap="truncate-end">{` ↩ ${replyLabel} · Esc cancel`}</Text>
+      ) : null}
+      <Text>
       <Text color={theme.accent} bold>{' › '}</Text>
       {chars.length === 0 ? (
         <>
@@ -148,6 +156,7 @@ export const InputLine = memo(function InputLine({ width, enabled, onSubmit, onT
           <Text color={theme.text}>{after}</Text>
         </>
       )}
-    </Text>
+      </Text>
+    </>
   )
 })

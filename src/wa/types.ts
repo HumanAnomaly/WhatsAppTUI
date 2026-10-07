@@ -32,6 +32,15 @@ export interface WaPlaybackState {
   startedAtMs: number
 }
 
+/** Target of a reply — enough to quote on send + render the quote bar. */
+export interface WaReplyRef {
+  id: string
+  fromMe: boolean
+  participant?: string
+  senderName?: string
+  text: string
+}
+
 export interface WaMsg {
   id: string
   /** Server-assigned id for channel posts (edits reference this, not `id`). */
@@ -41,9 +50,11 @@ export interface WaMsg {
   senderName?: string
   text: string
   ts: number
-  status: 'pending' | 'sent' | 'read' | 'failed'
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed'
   system?: boolean
   media?: WaMediaInfo | null
+  /** Quoted message for replies — id + a text/snippet preview. */
+  replyTo?: { id: string; senderName?: string; text: string }
 }
 
 export interface WaThread {
@@ -63,6 +74,8 @@ export interface WaThread {
   memberCount?: number
   /** Group description, when the server provides one. */
   groupDesc?: string
+  /** Group member list from the last metadata refresh (jid + best-known name). */
+  members?: Array<{ jid: string; name: string }>
   /** Bumped on every mutation — memo stability key for React components. */
   rev: number
 }
@@ -92,8 +105,12 @@ export interface GatewayState {
   reconnection: { attempt: number; max: number; delayMs: number } | null
   bootSteps: string[]
   historyProgress: number | null
+  /** Background sync running (local hydrate / post-connect backfill). */
+  syncing: boolean
   profile: ProfileView | null
   demo: boolean
+  /** Active media download (drives the status-bar progress hint). */
+  download: { jid: string; id: string; label: string } | null
 }
 
 // zapo's Proto.IMessage arrives fully typed; we only read the fields we render.

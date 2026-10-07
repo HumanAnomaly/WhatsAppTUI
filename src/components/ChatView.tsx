@@ -2,9 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Text } from 'ink'
 import { COLLAPSE_AT, chatKindIcon, collapseText, displayJid, formatFullTime, visualWidth } from '../format.js'
 import { useHover, useMouse, type MouseEvt } from '../mouse.js'
-import { usePlayback, useTheme, useTicker } from '../hooks.js'
-import { gateway, formatMediaDuration, type WaMsg, type WaThread } from '../wa/gateway.js'
-import { renderImageCells, type ImageCells } from '../media.js'
+import { useTheme } from '../hooks.js'
+import { gateway, type WaMsg, type WaThread } from '../wa/gateway.js'
 
 const SENDER_COLORS = ['#7FDBCA', '#E9C46A', '#9BB8FF', '#FFB4A2', '#B5E48C', '#D8A7FF', '#8ECAE6']
 
@@ -19,6 +18,7 @@ function ticks(msg: WaMsg): string {
   if (msg.status === 'pending') return ' ◌'
   if (msg.status === 'failed') return ' ✖'
   if (msg.status === 'read') return ' ✓✓'
+  if (msg.status === 'delivered') return ' ✓✓'
   return ' ✓'
 }
 
@@ -33,6 +33,16 @@ const BLOCK_GAP_MS = 5 * 60_000
 
 function isSystemMsg(x: MsgBlock | WaMsg): x is WaMsg {
   return (x as WaMsg).system === true
+}
+
+const QUOTE_AT = 90
+
+/** Single-line quote preview rendered above a reply's text. */
+function quoteLine(m: WaMsg): string | null {
+  if (!m.replyTo) return null
+  const who = m.replyTo.senderName ?? 'them'
+  const s = `│ ${who}: ${m.replyTo.text.replace(/\s+/g, ' ')}`
+  return s.length > QUOTE_AT ? `${s.slice(0, QUOTE_AT)}…` : s
 }
 
 function buildBlocks(msgs: WaMsg[]): Array<MsgBlock | WaMsg> {
@@ -68,108 +78,10 @@ interface BubbleProps {
   width: number
 }
 
-const imgColsFor = (maxWidth: number): number => Math.max(12, Math.min(44, maxWidth - 6))
-
-// Inline preview treatment: a small framed thumbnail (never full-bleed), so
-// bright photos can't swallow the surrounding chat. Both the bubble and the
-// row counter below must use this — never call imageCellsFor directly.
-const PREVIEW_MAX_COLS = 30
-const PREVIEW_MAX_ROWS = 8
-const PREVIEW_PAD = 1
-
-const cellsCache = new Map<string, ImageCells | null>()
-function imageCellsFor(path: string, maxCols: number, maxRows = 24): ImageCells | null {
-  const key = `${path}|${maxCols}|${maxRows}`
-  if (!cellsCache.has(key)) {
-    try {
-      cellsCache.set(key, renderImageCells(path, maxCols, maxRows))
-    } catch {
-      cellsCache.set(key, null)
-    }
-  }
-  return cellsCache.get(key) ?? null
-}
-
-function previewCells(localPath: string, maxWidth: number): ImageCells | null {
-  return imageCellsFor(localPath, Math.min(imgColsFor(maxWidth), PREVIEW_MAX_COLS), PREVIEW_MAX_ROWS)
-}
-
-const ImageCellsView = memo(function ImageCellsView({ cells }: { cells: ImageCells }) {
-  return (
-    <Box flexDirection="column">
-      {cells.lines.map((runs, i) => (
-        <Text key={i}>
-          {runs.map((r, j) => (
-            <Text key={j} color={r.fg} backgroundColor={r.bg}>
-              {'▀'.repeat(r.n)}
-            </Text>
-          ))}
-        </Text>
-      ))}
-    </Box>
-  )
-})
-
-/** Row count a media message occupies — must match Bubble's layout exactly. */
-function mediaMsgRows(m: WaMsg, maxWidth: number, rowsFor: (text: string) => number): number {
-  const media = m.media!
-  if (media.kind === 'voice' || media.kind === 'audio') {
-    return rowsFor(voiceRowText(m, maxWidth, true, media.durationSec ?? 0)) + 1
-  }
-  if (media.kind !== 'image' || !media.localPath) return rowsFor(m.text) + 1
-  const cells = previewCells(media.localPath, maxWidth)
-  if (!cells) return rowsFor(m.text) + 1
-  const capRows = media.caption ? rowsFor(media.caption) : 0
-  return cells.rows + capRows + 1 + PREVIEW_PAD * 2
-}
-
-/**
- * Voice-note row, WhatsApp-style: mic, play/pause, progress bar, duration.
- * Laid out with the (longest) playing form so the row never reflows.
- */
-function voiceRowText(msg: WaMsg, maxWidth: number, playing: boolean, elapsed: number): string {
-  const dur = msg.media?.durationSec ?? 0
-  const barWidth = Math.max(6, Math.min(20, maxWidth - 19))
-  let bar = ''
-  if (dur > 0) {
-    const frac = playing && dur > 0 ? Math.min(1, elapsed / dur) : 0
-    const head = Math.round(frac * barWidth)
-    if (head <= 0) bar = '─'.repeat(barWidth)
-    else if (head >= barWidth) bar = '━'.repeat(barWidth)
-    else bar = '━'.repeat(head) + '╸' + '─'.repeat(barWidth - head - 1)
-  }
-  const icon = playing ? '⏸' : '▶'
-  const time =
-    dur > 0
-      ? playing
-        ? `${formatMediaDuration(Math.floor(elapsed))} / ${formatMediaDuration(dur)}`
-        : formatMediaDuration(dur)
-      : '—'
-  return `🎤 ${icon}${bar ? ` ${bar}` : ''} ${time}`
-}
-
-const VoiceRow = memo(function VoiceRow({ msg, hovered, width }: { msg: WaMsg; hovered: boolean; width: number }) {
-  const theme = useTheme()
-  const pb = usePlayback()
-  const active = pb !== null && pb.id === msg.id
-  // Tick only while this row is the playing one.
-  const tick = useTicker(active ? 400 : 60_000)
-  void tick
-  const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
-  const bg = hovered ? (msg.fromMe ? theme.bubbleOutHover : theme.bubbleInHover) : msg.fromMe ? theme.bubbleOut : theme.bubbleIn
-  const dur = msg.media?.durationSec ?? 0
-  const elapsed = active && pb ? Math.floor((Date.now() - pb.startedAtMs) / 1000) : 0
-  const text = voiceRowText(msg, maxWidth, active, Math.min(elapsed, dur))
-  return (
-    <Text backgroundColor={bg} color={theme.text} wrap="truncate-end">
-      {` ${text} `}
-    </Text>
-  )
-})
-
 const Bubble = memo(function Bubble({ msg, text, status, hovered, width }: BubbleProps) {
   const theme = useTheme()
   void status // memo contract: re-render when delivery status changes
+  const quote = quoteLine(msg)
   const maxWidth = Math.max(18, Math.min(72, Math.floor(width * 0.72)))
   const inBg = hovered ? theme.bubbleInHover : theme.bubbleIn
   const outBg = hovered ? theme.bubbleOutHover : theme.bubbleOut
@@ -190,41 +102,11 @@ const Bubble = memo(function Bubble({ msg, text, status, hovered, width }: Bubbl
     </Text>
   )
 
-  if (msg.media?.kind === 'voice' || msg.media?.kind === 'audio') {
-    return (
-      <Box paddingX={1} flexDirection="row" justifyContent={msg.fromMe ? 'flex-end' : 'flex-start'}>
-        <Box flexDirection="column" alignItems={msg.fromMe ? 'flex-end' : 'flex-start'}>
-          <VoiceRow msg={msg} hovered={hovered} width={width} />
-          {metaLine(msg.fromMe ? outBg : inBg)}
-        </Box>
-      </Box>
-    )
-  }
-
-  const imgCells =
-    msg.media?.kind === 'image' && msg.media.localPath
-      ? previewCells(msg.media.localPath, maxWidth)
-      : null
-  if (imgCells) {
-    const bg = msg.fromMe ? outBg : inBg
-    return (
-      <Box paddingX={1} flexDirection="row" justifyContent={msg.fromMe ? 'flex-end' : 'flex-start'}>
-        <Box flexDirection="column" alignItems={msg.fromMe ? 'flex-end' : 'flex-start'}>
-          <Box backgroundColor={bg} paddingX={PREVIEW_PAD} paddingY={PREVIEW_PAD}>
-            <ImageCellsView cells={imgCells} />
-          </Box>
-          {msg.media!.caption ? (
-            <Text backgroundColor={bg} color={theme.text} wrap="wrap">{` ${msg.media!.caption} `}</Text>
-          ) : null}
-          {metaLine(bg)}
-        </Box>
-      </Box>
-    )
-  }
   if (msg.fromMe) {
     return (
       <Box justifyContent="flex-end" paddingX={1}>
         <Box flexDirection="column" width={maxWidth} alignItems="flex-end">
+          {quote ? <Text backgroundColor={outBg} color={theme.dimmer} wrap="wrap">{` ${quote} `}</Text> : null}
           <Text backgroundColor={outBg} color={theme.text} wrap="wrap">{` ${text} `}</Text>
           {metaLine(outBg)}
         </Box>
@@ -234,6 +116,7 @@ const Bubble = memo(function Bubble({ msg, text, status, hovered, width }: Bubbl
   return (
     <Box flexDirection="column" paddingX={1} alignItems="flex-start">
       <Box flexDirection="column" width={maxWidth} alignItems="flex-start">
+        {quote ? <Text backgroundColor={inBg} color={theme.dimmer} wrap="wrap">{` ${quote} `}</Text> : null}
         <Text backgroundColor={inBg} color={theme.text} wrap="wrap">{` ${text} `}</Text>
         {metaLine(inBg)}
       </Box>
@@ -298,7 +181,8 @@ export const MessageList = memo(function MessageList({ thread, rev, width, heigh
       if (thread.jid.endsWith('@g.us') && first.senderName) row += 1
       for (const m of b.msgs) {
         const shown = displayText(m)
-        const tl = m.media ? mediaMsgRows(m, maxWidth, rowsFor) : rowsFor(shown)
+        const q = quoteLine(m)
+        const tl = rowsFor(shown) + 1 + (q ? rowsFor(q) : 0)
         lineMap.push({ start: row, end: row + tl - 1, id: m.id, text: m.text })
         row += tl + 1
       }

@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 import { proto, resolveMediaPayload } from 'zapo-js'
 import type { WaIncomingMessageEvent } from 'zapo-js'
 import { GatewayStateBase } from './gateway-state.js'
 import { MEDIA_DIR } from './paths.js'
 import { extForMimetype, sanitizeBase, sanitizeJidForPath } from './paths.js'
-import { openExternalFile, playAudioFile } from './media-os.js'
+import { hasAudioPlayer, openExternalFile, playAudioFile } from './media-os.js'
 import { errorMessage } from './decode.js'
-import type { ThreadData, WaMediaInfo, WaMsg, WaPlaybackState } from './types.js'
+import type { ThreadData, WaMediaInfo, WaMsg, WaPlaybackState, WaReplyRef } from './types.js'
 
 /** Media cache, download/open/play pipeline and voice-note playback state. */
 export class GatewayMediaBase extends GatewayStateBase {
@@ -24,12 +24,26 @@ export class GatewayMediaBase extends GatewayStateBase {
     return `${jid}\n${id}`
   }
 
+  /** FIFO-trim a cache: Maps/Sets iterate in insertion order, so the head is oldest. */
+  private trimCache(cache: Map<unknown, unknown> | Set<unknown>, max: number): void {
+    if (cache.size <= max) return
+    let drop = cache.size - max
+    for (const k of cache.keys()) {
+      cache.delete(k as never)
+      if (--drop <= 0) break
+    }
+  }
+
   protected rememberMedia(jid: string, id: string, message?: unknown, event?: WaIncomingMessageEvent | null): void {
     try {
       if (message && typeof message === 'object') {
         this.mediaSources.set(this.mediaMapKey(jid, id), message as proto.Message)
+        this.trimCache(this.mediaSources, 400)
       }
-      if (event) this.mediaEvents.set(this.mediaMapKey(jid, id), event)
+      if (event) {
+        this.mediaEvents.set(this.mediaMapKey(jid, id), event)
+        this.trimCache(this.mediaEvents, 400)
+      }
     } catch {
     }
   }
@@ -71,6 +85,28 @@ export class GatewayMediaBase extends GatewayStateBase {
     return pick(this.hoveredMedia.get(jid)) ?? pick(this.activeMedia.get(jid)) ?? this.findLastMedia(jid)
   }
 
+  /** Reply target: hovered/clicked message → most recent message in the chat. */
+  resolveReplyTarget(jid: string): WaReplyRef | undefined {
+    const t = this.threads.get(jid)
+    if (!t) return undefined
+    const pick = (id: string | undefined): WaMsg | undefined => {
+      if (!id) return undefined
+      const m = t.messages.find((x) => x.id === id)
+      return m && !m.system ? m : undefined
+    }
+    const m = pick(this.hoveredMedia.get(jid)) ?? pick(this.activeMedia.get(jid))
+      ?? [...t.messages].reverse().find((x) => !x.system)
+    if (!m) return undefined
+    const senderName = m.senderName ?? (m.fromMe ? 'you' : 'them')
+    return {
+      id: m.id,
+      fromMe: m.fromMe,
+      ...(m.senderJid ? { participant: m.senderJid } : {}),
+      senderName,
+      text: m.text,
+    }
+  }
+
   /** Download (or reuse cached) media bytes to `.media/<chat>/<id>_<name>`. Returns absolute path. */
   async ensureMediaFile(jid: string, id: string): Promise<string> {
     const t = this.threads.get(jid)
@@ -91,6 +127,27 @@ export class GatewayMediaBase extends GatewayStateBase {
     if (this.state.demo) throw new Error('Demo mode: media download is disabled')
     const client = this.client
     if (!client) throw new Error('Not connected')
+    const key = this.mediaMapKey(jid, id)
+    // One download per message: concurrent open+play taps share the same promise.
+    const inflight = this.downloadInflight.get(key)
+    if (inflight) return inflight
+    const run = this.downloadMediaFile(jid, id)
+    this.downloadInflight.set(key, run)
+    try {
+      return await run
+    } finally {
+      this.downloadInflight.delete(key)
+    }
+  }
+
+  /** In-flight downloads by media key — concurrent taps share one promise. */
+  private downloadInflight = new Map<string, Promise<string>>()
+
+  private async downloadMediaFile(jid: string, id: string): Promise<string> {
+    const client = this.client
+    const t = this.threads.get(jid)
+    const msg = t?.messages.find((m) => m.id === id)
+    if (!msg?.media || !client || !t) throw new Error('Download no longer available')
     const key = this.mediaMapKey(jid, id)
     const source = this.mediaSources.get(key)
     if (!source) throw new Error('Media source expired (history message without proto). Ask sender to resend.')
@@ -120,8 +177,9 @@ export class GatewayMediaBase extends GatewayStateBase {
     const fileName = `${sanitizeBase(id)}_${sanitizeBase(fallbackName)}`
     const dest = resolvePath(chatDir, fileName)
     const dlSource = this.mediaEvents.get(key) ?? (source as never)
+    this.set({ download: { jid, id, label: fileName } })
     try {
-      await client.message.downloadToFile(dlSource as never, dest)
+      await client.message.downloadToFile(dlSource as never, dest, { timeoutMs: 120_000 })
     } catch (err) {
       const msgText = (err as Error)?.message ?? String(err)
       const looksExpired = /404|410|not.?found|expired|no such|gone/i.test(msgText)
@@ -129,14 +187,27 @@ export class GatewayMediaBase extends GatewayStateBase {
       if (looksExpired && liveEvent) {
         try {
           this.set({ note: 'Media expired — requesting reupload…' })
-          await client.message.requestMediaReupload(liveEvent as never)
-          await client.message.downloadToFile(liveEvent as never, dest)
+          const retry = await client.message.requestMediaReupload(liveEvent as never, { timeoutMs: 30_000 })
+          if (retry.result !== 'success') throw new Error(`reupload ${retry.result}`)
+          await client.message.downloadToFile(liveEvent as never, dest, { timeoutMs: 120_000 })
         } catch (reErr) {
+          try {
+            unlinkSync(dest)
+          } catch {
+            // partial file may not exist — nothing to clean
+          }
           throw new Error(`Download failed even after reupload: ${errorMessage(reErr) || msgText}`)
         }
       } else {
+        try {
+          unlinkSync(dest)
+        } catch {
+          // partial file may not exist — nothing to clean
+        }
         throw new Error(`Download failed: ${msgText}`)
       }
+    } finally {
+      this.set({ download: null })
     }
     msg.media.localPath = dest
     if (msg.media.viewOnce) msg.media.opened = true
@@ -146,7 +217,7 @@ export class GatewayMediaBase extends GatewayStateBase {
 
   async openMedia(jid: string, id: string): Promise<string> {
     const path = await this.ensureMediaFile(jid, id)
-    openExternalFile(path)
+    if (!openExternalFile(path)) throw new Error(`No viewer to open it here (headless?) — file at ${path}`)
     return path
   }
 
@@ -187,6 +258,7 @@ export class GatewayMediaBase extends GatewayStateBase {
     }
     this.stopPlayback()
     const path = await this.ensureMediaFile(jid, id)
+    if (!hasAudioPlayer(path)) throw new Error(`No audio player (mpv/ffplay) — file at ${path}`)
     const msg = this.getMessage(jid, id)
     const durationSec = msg?.media?.durationSec ?? 0
     this.setPlayback({ jid, id, durationSec, startedAtMs: Date.now() })

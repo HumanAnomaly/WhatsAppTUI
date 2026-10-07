@@ -6,7 +6,7 @@ import { wavDurationSec } from '../media.js'
 import { getSettings } from '../config.js'
 import { BUNDLED_DEMO_PHOTO, BUNDLED_DEMO_VOICE, MEDIA_DIR } from './paths.js'
 import { inferDemoMedia } from './decode.js'
-import type { ThreadData, WaMsg } from './types.js'
+import type { ThreadData, WaMsg, WaReplyRef } from './types.js'
 
 export type AuthDemoSlug =
   | 'loading'
@@ -37,8 +37,8 @@ export class GatewayDemoBase extends GatewayConnectionBase {
     this.demoTimers = []
   }
 
-  protected override handleDemoSend(t: ThreadData, text: string): boolean {
-    this.demoSend(t, text)
+  protected override handleDemoSend(t: ThreadData, text: string, reply?: WaReplyRef): boolean {
+    this.demoSend(t, text, reply)
     return true
   }
 
@@ -315,6 +315,7 @@ export class GatewayDemoBase extends GatewayConnectionBase {
       const items: WaMsg[] = [
         { id: 'demo-media-photo', fromMe: false, senderJid: jid, senderName: 'Gilang', text: '[📷 photo] golden hour today was unreal', ts: now - 30 * M, status: 'read', media: { kind: 'image', caption: 'golden hour today was unreal', mimetype: 'image/png', downloadable: true, localPath: photoPath } },
         { id: 'demo-media-voice', fromMe: false, senderJid: jid, senderName: 'Mega', text: '[🎤 voice note]', ts: now - 20 * M, status: 'read', media: { kind: 'voice', isPtt: true, durationSec: wavDurationSec(voicePath) || 2, mimetype: 'audio/wav', downloadable: true, localPath: voicePath } },
+        { id: 'demo-media-photo-me', fromMe: true, text: '[📷 photo] my turn — view from my window', ts: now - 10 * M, status: 'read', replyTo: { id: 'demo-media-photo', senderName: 'Gilang', text: '[📷 photo] golden hour today was unreal' }, media: { kind: 'image', caption: 'my turn — view from my window', mimetype: 'image/png', downloadable: true, localPath: photoPath } },
       ]
       let changed = false
       for (const m of items) {
@@ -384,9 +385,16 @@ export class GatewayDemoBase extends GatewayConnectionBase {
     this.bump(t)
   }
 
-  protected demoSend(t: ThreadData, text: string): void {
+  protected demoSend(t: ThreadData, text: string, reply?: WaReplyRef): void {
     const id = `demo-out-${Date.now()}`
-    t.messages.push({ id, fromMe: true, text, ts: Date.now(), status: 'pending' })
+    t.messages.push({
+      id,
+      fromMe: true,
+      text,
+      ts: Date.now(),
+      status: 'pending',
+      ...(reply ? { replyTo: { id: reply.id, senderName: reply.senderName, text: reply.text.slice(0, 150) } } : {}),
+    })
     t.lastTs = Date.now()
     this.bump(t)
     const setStatus = (status: 'sent' | 'read'): void => {

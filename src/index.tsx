@@ -17,6 +17,17 @@ process.on('exit', () => {
   process.stdout.write('\x1b[?1049l') // leave the alternate screen
 })
 
+// Kill/term must close the WA socket cleanly — otherwise the server keeps
+// the stale session and the next boot fights it (stream conflict).
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(sig, () => {
+    void gateway.shutdown().then(
+      () => process.exit(sig === 'SIGINT' ? 130 : 0),
+      () => process.exit(1),
+    )
+  })
+}
+
 const DEMO_HELP = `WhatsAppTUI — demo auth/loading playground
 
 Usage:

@@ -37,8 +37,10 @@ export class GatewayStateBase {
     reconnection: null,
     bootSteps: [],
     historyProgress: null,
+    syncing: false,
     profile: null,
     demo: false,
+    download: null,
   }
 
   subscribe = (listener: () => void): (() => void) => {

@@ -1,16 +1,26 @@
-import { isNewsletterJid, isStatusBroadcastJid } from 'zapo-js'
+import { isNewsletterJid, isStatusBroadcastJid, getContextInfo } from 'zapo-js'
 import type { WaIncomingMessageEvent, WaIncomingUnavailableMessageEvent } from 'zapo-js'
 import { GatewayMediaBase } from './gateway-media.js'
 import { decodeStoredMessageFull, describeMessage } from './decode.js'
 import { backupStoreFile } from './profiles.js'
 import { getSettings } from '../config.js'
-import type { ThreadData, WaMediaInfo } from './types.js'
+import type { ThreadData, WaMediaInfo, WaMsg } from './types.js'
 
 export class GatewayMessagesBase extends GatewayMediaBase {
   protected receiptSent = new Set<string>()
   protected contactLookups = new Set<string>()
   protected oldestBeforeRequest = new Map<string, string | null>()
   protected hydrateTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** Cap a resolve-once set so long sessions can't grow it without bound. */
+  private trimLookup(set: Set<string>, max: number): void {
+    if (set.size <= max) return
+    let drop = set.size - max
+    for (const v of set) {
+      set.delete(v)
+      if (--drop <= 0) break
+    }
+  }
 
   protected ingestMessage(event: WaIncomingMessageEvent): void {
     const jid = event.key.remoteJid
@@ -26,6 +36,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     const described = describeMessage(event.message, event.expirationSeconds)
     const text = described.text
     if (described.media || event.message) this.rememberMedia(jid, id, event.message as unknown, event)
+    const replyTo = this.readQuote(event.message, t)
 
     if (event.pushName) {
       if (event.key.isGroup && event.key.participant && !event.key.fromMe) {
@@ -44,6 +55,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     if (existing) {
       if (text) existing.text = text
       if (described.media) existing.media = described.media
+      if (replyTo && !existing.replyTo) existing.replyTo = replyTo
       if (t.lastTs < ts) t.lastTs = ts
       this.bump(t)
       return
@@ -63,6 +75,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
       ts,
       status: 'sent',
       media: described.media ?? null,
+      ...(replyTo ? { replyTo } : {}),
     })
     t.typing = false
     t.lastTs = Math.max(t.lastTs, ts)
@@ -77,19 +90,25 @@ export class GatewayMessagesBase extends GatewayMediaBase {
       }
     }
     this.bump(t)
-    // Professional touch: incoming photos fetch themselves in the background
-    // so they render inline without pressing `o` first. Live messages only —
-    // history stays on-demand, view-once stays manual, demo has no server.
-    if (
-      !event.key.fromMe &&
-      getSettings().autoDownload &&
-      described.media?.kind === 'image' &&
-      !described.media.viewOnce &&
-      described.media.downloadable &&
-      !this.state.demo &&
-      this.client
-    ) {
-      void this.ensureMediaFile(jid, id).catch(() => undefined)
+  }
+
+  /** Extract the quoted message of a reply (stanzaId + snippet for the quote bar). */
+  protected readQuote(message: unknown, t: ThreadData): WaMsg['replyTo'] {
+    try {
+      const ctx = getContextInfo(message as never) as unknown as {
+        stanzaId?: string
+        participant?: string
+        quotedMessage?: unknown
+      } | null
+      const id = ctx?.stanzaId
+      if (!id || !ctx?.quotedMessage) return undefined
+      const quoted = describeMessage(ctx.quotedMessage)
+      const text = (quoted.text || '[media]').slice(0, 150)
+      const participant = ctx.participant
+      const senderName = participant ? t.senderNames[participant] : undefined
+      return { id, ...(senderName ? { senderName } : {}), text }
+    } catch {
+      return undefined
     }
   }
 
@@ -134,6 +153,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     const id = event.key.id
     if (!id || this.receiptSent.has(id)) return
     this.receiptSent.add(id)
+    this.trimLookup(this.receiptSent, 5_000)
     try {
       await client.message.sendReceipt(event, { type: 'read' })
     } catch {
@@ -174,6 +194,7 @@ export class GatewayMessagesBase extends GatewayMediaBase {
     const store = this.store
     if (!store || this.contactLookups.has(jid)) return
     this.contactLookups.add(jid)
+    this.trimLookup(this.contactLookups, 2_000)
     try {
       const sess = store.session('default')
       const contact = await sess.contacts.getByJid(jid)
@@ -225,13 +246,13 @@ export class GatewayMessagesBase extends GatewayMediaBase {
   protected async hydrateFromStore(): Promise<void> {
     const store = this.store
     if (!store) return
+    this.set({ syncing: true })
     try {
       const sess = store.session('default')
       const threadRecords = await sess.threads.list(300)
-      // Threads hydrate independently — fan out so one slow SQLite read
-      // doesn't serialize the whole boot.
-      await Promise.all(
-        threadRecords.map(async (rec) => {
+      // Threads hydrate independently, but a flat Promise.all fans out
+      // hundreds of SQLite reads at boot — chunk so slow disks survive.
+      const hydrateOne = async (rec: (typeof threadRecords)[number]): Promise<void> => {
           try {
             if (isStatusBroadcastJid(rec.jid) || isNewsletterJid(rec.jid)) return
             const t = this.thread(rec.jid)
@@ -302,9 +323,13 @@ export class GatewayMessagesBase extends GatewayMediaBase {
             }
           } catch {
           }
-        }),
-      )
+        }
+      for (let i = 0; i < threadRecords.length; i += 12) {
+        await Promise.all(threadRecords.slice(i, i + 12).map((rec) => hydrateOne(rec)))
+      }
     } catch {
+    } finally {
+      this.set({ syncing: false })
     }
   }
 

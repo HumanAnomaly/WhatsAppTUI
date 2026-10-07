@@ -5,7 +5,7 @@ import { getSettings } from '../config.js'
 import { displayJid } from '../format.js'
 import { errorMessage } from './decode.js'
 import { expandHome, guessMimetype } from './paths.js'
-import type { MediaKind, Screen, ThreadData, WaMediaInfo } from './types.js'
+import type { MediaKind, Screen, ThreadData, WaMediaInfo, WaReplyRef } from './types.js'
 
 export class GatewayActionsBase extends GatewayProfileBase {
   async activateChat(jid: string, resubscribe = false): Promise<void> {
@@ -76,13 +76,13 @@ export class GatewayActionsBase extends GatewayProfileBase {
     }
   }
 
-  async send(jid: string, text: string): Promise<void> {
+  async send(jid: string, text: string, reply?: WaReplyRef): Promise<void> {
     const client = this.client
     const trimmed = text.trim()
     if (!trimmed) return
     const t = this.thread(jid)
     if (this.state.demo) {
-      if (this.handleDemoSend(t, trimmed)) return
+      if (this.handleDemoSend(t, trimmed, reply)) return
     }
     if (!client) {
       t.messages.push({ id: `local-${Date.now()}`, fromMe: true, text: trimmed, ts: Date.now(), status: 'failed' })
@@ -91,7 +91,14 @@ export class GatewayActionsBase extends GatewayProfileBase {
       return
     }
     const pendingId = `local-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    t.messages.push({ id: pendingId, fromMe: true, text: trimmed, ts: Date.now(), status: 'pending' })
+    t.messages.push({
+      id: pendingId,
+      fromMe: true,
+      text: trimmed,
+      ts: Date.now(),
+      status: 'pending',
+      ...(reply ? { replyTo: { id: reply.id, ...(reply.senderName ? { senderName: reply.senderName } : {}), text: reply.text.slice(0, 150) } } : {}),
+    })
     t.lastTs = Date.now()
     this.bump(t)
     if (jid.endsWith('@newsletter')) {
@@ -110,7 +117,10 @@ export class GatewayActionsBase extends GatewayProfileBase {
       return
     }
     try {
-      const result = await client.message.send(jid, trimmed)
+      const content = reply
+        ? { type: 'text', text: trimmed, contextInfo: this.replyContext(jid, reply) }
+        : trimmed
+      const result = await client.message.send(jid, content as never)
       const msg = t.messages.find((m) => m.id === pendingId)
       if (msg) {
         msg.id = result.id
@@ -124,10 +134,22 @@ export class GatewayActionsBase extends GatewayProfileBase {
     }
   }
 
+  /**
+   * Quote context for a reply. The participant is only pinned for group
+   * messages — in 1:1 the coordinator resolves it from the chat itself.
+   */
+  protected replyContext(jid: string, reply: WaReplyRef): Record<string, unknown> {
+    void jid
+    return {
+      quotedMessageId: reply.id,
+      ...(reply.participant && jid.endsWith('@g.us') ? { quotedParticipant: reply.participant } : {}),
+    }
+  }
+
   protected typingSentFor = new Map<string, ReturnType<typeof setTimeout>>()
 
   /** Demo hooks — overridden by the demo layer; base is a no-op. */
-  protected handleDemoSend(_t: ThreadData, _text: string): boolean {
+  protected handleDemoSend(_t: ThreadData, _text: string, _reply?: WaReplyRef): boolean {
     return false
   }
 
@@ -136,7 +158,7 @@ export class GatewayActionsBase extends GatewayProfileBase {
   }
 
   /** Attach and send media — /img /vid /gif /ptv /aud /vn /doc /stk from the input box. */
-  async sendMedia(jid: string, kind: MediaKind, rawPath: string, caption?: string, opts?: { viewOnce?: boolean }): Promise<void> {
+  async sendMedia(jid: string, kind: MediaKind, rawPath: string, caption?: string, opts?: { viewOnce?: boolean; reply?: WaReplyRef }): Promise<void> {
     const client = this.client
     const t = this.thread(jid)
     const abs = expandHome(rawPath)
@@ -186,12 +208,21 @@ export class GatewayActionsBase extends GatewayProfileBase {
     }
 
     const pendingId = `media-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    t.messages.push({ id: pendingId, fromMe: true, text: placeholder, ts: Date.now(), status: 'pending', media: mediaInfo })
+    t.messages.push({
+      id: pendingId,
+      fromMe: true,
+      text: placeholder,
+      ts: Date.now(),
+      status: 'pending',
+      media: mediaInfo,
+      ...(opts?.reply ? { replyTo: { id: opts.reply.id, ...(opts.reply.senderName ? { senderName: opts.reply.senderName } : {}), text: opts.reply.text.slice(0, 150) } } : {}),
+    })
     t.lastTs = Date.now()
     this.bump(t)
 
     const mimetype = guessMimetype(abs, kind)
     const sendOpts = viewOnce ? { viewOnce: true } : undefined
+    const quoteCtx = opts?.reply ? this.replyContext(jid, opts.reply) : null
     try {
       let content: Record<string, unknown>
       if (kind === 'image') content = { type: 'image', media: abs, mimetype, caption }
@@ -206,6 +237,7 @@ export class GatewayActionsBase extends GatewayProfileBase {
       else if (kind === 'audio') content = { type: 'audio', media: abs, mimetype }
       else if (kind === 'sticker') content = { type: 'sticker', media: abs, mimetype: mimetype === 'application/octet-stream' ? 'image/webp' : mimetype }
       else content = { type: 'document', media: abs, mimetype, fileName: fileBase, caption }
+      if (quoteCtx) content = { ...content, contextInfo: quoteCtx }
       const result = await client.message.send(jid, content as never, sendOpts as never)
       const msg = t.messages.find((m) => m.id === pendingId)
       if (msg) {
@@ -298,6 +330,14 @@ export class GatewayActionsBase extends GatewayProfileBase {
       t.memberCount = count > 0 ? count : undefined
       const descRaw = meta.desc ?? meta.description
       t.groupDesc = typeof descRaw === 'string' && descRaw ? descRaw : undefined
+      const parts = (meta.participants ?? []) as Array<{ jid?: string; displayName?: string; phoneNumber?: string }>
+      if (parts.length > 0) {
+        t.members = parts.slice(0, 100).map((p) => {
+          const pj = p.jid ?? ''
+          const name = p.displayName ?? t.senderNames[pj] ?? (p.phoneNumber ? `+${p.phoneNumber.replace(/\D/g, '')}` : displayJid(pj))
+          return { jid: pj, name }
+        })
+      }
       this.bump(t)
     } catch {
       t.infoSummary = 'Group info unavailable right now'

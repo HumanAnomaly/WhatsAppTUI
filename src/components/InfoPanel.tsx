@@ -74,6 +74,12 @@ export const InfoPanel = memo(function InfoPanel({ thread, rev, width }: { threa
           <Text color={theme.dim} wrap="truncate-end">{truncateVisual(thread.groupDesc, inner)}</Text>
         </Box>
       ) : null}
+      {isGroup && thread.members && thread.members.length > 0 ? (
+        <Box marginTop={1} flexDirection="column" width={inner}>
+          <Text color={theme.text} bold wrap="truncate-end">{`Members (${thread.members.length})`}</Text>
+          <Text color={theme.dim} wrap="truncate-end">{truncateVisual(thread.members.map((m) => m.name).join(', '), inner)}</Text>
+        </Box>
+      ) : null}
       <Box marginTop={1} flexDirection="column" width={inner}>
         <Text color={theme.text} bold wrap="truncate-end">{`Media, links & docs (${media.length})`}</Text>
         {recent.length === 0 ? (

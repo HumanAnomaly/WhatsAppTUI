@@ -1,4 +1,28 @@
 import { spawn } from 'node:child_process'
+import { accessSync, constants } from 'node:fs'
+import { delimiter } from 'node:path'
+
+/** Sync PATH lookup — so we never claim "opened/playing" when no app exists. */
+export function commandExists(cmd: string): boolean {
+  if (cmd.includes('/')) {
+    try {
+      accessSync(cmd, constants.X_OK)
+      return true
+    } catch {
+      return false
+    }
+  }
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue
+    try {
+      accessSync(`${dir}/${cmd}`, constants.X_OK)
+      return true
+    } catch {
+      // try next dir
+    }
+  }
+  return false
+}
 
 /** Spawn without ever crashing on ENOENT — spawn errors arrive asynchronously. */
 export function spawnIgnorant(cmd: string, args: string[], onFail?: () => void): { kill(): void } | null {
@@ -13,11 +37,31 @@ export function spawnIgnorant(cmd: string, args: string[], onFail?: () => void):
   }
 }
 
-export function openExternalFile(filePath: string): void {
+export function openExternalFile(filePath: string): boolean {
   const fail = (): void => undefined
-  if (process.platform === 'win32') spawnIgnorant('cmd', ['/c', 'start', '', filePath], fail)
-  else if (process.platform === 'darwin') spawnIgnorant('open', [filePath], fail)
-  else spawnIgnorant('xdg-open', [filePath], fail)
+  if (process.platform === 'win32') {
+    spawnIgnorant('cmd', ['/c', 'start', '', filePath], fail)
+    return true
+  }
+  if (process.platform === 'darwin') {
+    spawnIgnorant('open', [filePath], fail)
+    return true
+  }
+  // Headless Linux (SSH/container) has nowhere to open the file — say so
+  // instead of firing xdg-open into the void.
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false
+  if (!commandExists('xdg-open')) return false
+  spawnIgnorant('xdg-open', [filePath], fail)
+  return true
+}
+
+/** True when a real audio player binary exists (else playback would be silent). */
+export function hasAudioPlayer(filePath: string): boolean {
+  if (process.platform === 'win32' && /\.wav$/i.test(filePath)) return true
+  const cmds = ['mpv', 'ffplay']
+  if (process.platform === 'darwin') cmds.push('afplay')
+  if (process.platform === 'linux') cmds.push('paplay', 'aplay')
+  return cmds.some(commandExists)
 }
 
 /**
